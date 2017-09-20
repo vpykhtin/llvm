@@ -40,7 +40,6 @@ unsigned AMDGPURegisterInfo::getSubRegFromChannel(unsigned Channel) const {
 #define GET_REGINFO_TARGET_DESC
 #include "AMDGPUGenRegisterInfo.inc"
 
-
 // Forced to be here by one .inc
 const MCPhysReg *SIRegisterInfo::getCalleeSavedRegs(
   const MachineFunction *MF) const {
@@ -55,6 +54,20 @@ const MCPhysReg *SIRegisterInfo::getCalleeSavedRegs(
     return &NoCalleeSavedReg;
   }
   }
+}
+
+const MCPhysReg *
+SIRegisterInfo::getCalleeSavedRegsViaCopy(const MachineFunction *MF) const {
+  // FIXME
+  static MCPhysReg Regs[2];
+
+  const SIMachineFunctionInfo *MFI = MF->getInfo<SIMachineFunctionInfo>();
+  assert(!MFI->isEntryFunction());
+
+  Regs[0] = MFI->getFrameOffsetReg();
+  Regs[1] = AMDGPU::NoRegister;
+
+  return Regs;
 }
 
 const uint32_t *SIRegisterInfo::getCallPreservedMask(const MachineFunction &MF,

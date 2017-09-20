@@ -12,7 +12,6 @@
 #define LLVM_LIB_TARGET_AMDGPU_AMDGPU_H
 
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/Target/TargetMachine.h"
 
 namespace llvm {
@@ -35,9 +34,9 @@ FunctionPass *createR600ClauseMergePass();
 FunctionPass *createR600Packetizer();
 FunctionPass *createR600ControlFlowFinalizer();
 FunctionPass *createAMDGPUCFGStructurizerPass();
+FunctionPass *createR600ISelDag(TargetMachine *TM, CodeGenOpt::Level OptLevel);
 
 // SI Passes
-FunctionPass *createSITypeRewriter();
 FunctionPass *createSIAnnotateControlFlowPass();
 FunctionPass *createSIFoldOperandsPass();
 FunctionPass *createSIPeepholeSDWAPass();
@@ -46,24 +45,51 @@ FunctionPass *createSIShrinkInstructionsPass();
 FunctionPass *createSILoadStoreOptimizerPass();
 FunctionPass *createSIWholeQuadModePass();
 FunctionPass *createSIFixControlFlowLiveIntervalsPass();
+FunctionPass *createSIOptimizeExecMaskingPreRAPass();
 FunctionPass *createSIFixSGPRCopiesPass();
 FunctionPass *createSIMemoryLegalizerPass();
 FunctionPass *createSIDebuggerInsertNopsPass();
 FunctionPass *createSIInsertWaitsPass();
 FunctionPass *createSIInsertWaitcntsPass();
+FunctionPass *createSIFixWWMLivenessPass();
+FunctionPass *createAMDGPUSimplifyLibCallsPass();
+FunctionPass *createAMDGPUUseNativeCallsPass();
 FunctionPass *createAMDGPUCodeGenPreparePass();
 FunctionPass *createAMDGPUMachineCFGStructurizerPass();
+FunctionPass *createAMDGPURewriteOutArgumentsPass();
+
+void initializeAMDGPUDAGToDAGISelPass(PassRegistry&);
 
 void initializeAMDGPUMachineCFGStructurizerPass(PassRegistry&);
 extern char &AMDGPUMachineCFGStructurizerID;
 
-ModulePass *createAMDGPUAnnotateKernelFeaturesPass();
+void initializeAMDGPUAlwaysInlinePass(PassRegistry&);
+
+Pass *createAMDGPUAnnotateKernelFeaturesPass();
 void initializeAMDGPUAnnotateKernelFeaturesPass(PassRegistry &);
 extern char &AMDGPUAnnotateKernelFeaturesID;
 
 ModulePass *createAMDGPULowerIntrinsicsPass();
 void initializeAMDGPULowerIntrinsicsPass(PassRegistry &);
 extern char &AMDGPULowerIntrinsicsID;
+
+void initializeAMDGPURewriteOutArgumentsPass(PassRegistry &);
+extern char &AMDGPURewriteOutArgumentsID;
+
+void initializeR600ClauseMergePassPass(PassRegistry &);
+extern char &R600ClauseMergePassID;
+
+void initializeR600ControlFlowFinalizerPass(PassRegistry &);
+extern char &R600ControlFlowFinalizerID;
+
+void initializeR600ExpandSpecialInstrsPassPass(PassRegistry &);
+extern char &R600ExpandSpecialInstrsPassID;
+
+void initializeR600VectorRegMergerPass(PassRegistry &);
+extern char &R600VectorRegMergerID;
+
+void initializeR600PacketizerPass(PassRegistry &);
+extern char &R600PacketizerID;
 
 void initializeSIFoldOperandsPass(PassRegistry &);
 extern char &SIFoldOperandsID;
@@ -98,9 +124,14 @@ extern char &SIInsertSkipsPassID;
 void initializeSIOptimizeExecMaskingPass(PassRegistry &);
 extern char &SIOptimizeExecMaskingID;
 
-ModulePass *createAMDGPUConvertAtomicLibCallsPass();
-void initializeAMDGPUConvertAtomicLibCallsPass(PassRegistry &);
-extern char &AMDGPUConvertAtomicLibCallsID;
+void initializeSIFixWWMLivenessPass(PassRegistry &);
+extern char &SIFixWWMLivenessID;
+
+void initializeAMDGPUSimplifyLibCallsPass(PassRegistry &);
+extern char &AMDGPUSimplifyLibCallsID;
+
+void initializeAMDGPUUseNativeCallsPass(PassRegistry &);
+extern char &AMDGPUUseNativeCallsID;
 
 ModulePass *createAMDGPUclpVectorExpansionPass();
 void initializeAMDGPUclpVectorExpansionPass(PassRegistry &);
@@ -111,8 +142,10 @@ FunctionPass *createAMDGPUPromoteAlloca();
 void initializeAMDGPUPromoteAllocaPass(PassRegistry&);
 extern char &AMDGPUPromoteAllocaID;
 
-FunctionPass *createAMDGPUISelDag(TargetMachine &TM,
-                                  CodeGenOpt::Level OptLevel);
+Pass *createAMDGPUStructurizeCFGPass();
+FunctionPass *createAMDGPUISelDag(
+  TargetMachine *TM = nullptr,
+  CodeGenOpt::Level OptLevel = CodeGenOpt::Default);
 ModulePass *createAMDGPUAlwaysInlinePass(bool GlobalOpt = true);
 ModulePass *createAMDGPUOpenCLImageTypeLoweringPass();
 FunctionPass *createAMDGPUAnnotateUniformValues();
@@ -133,8 +166,8 @@ ModulePass* createAMDGPUUnifyMetadataPass();
 void initializeAMDGPUUnifyMetadataPass(PassRegistry&);
 extern char &AMDGPUUnifyMetadataID;
 
-void initializeSIFixControlFlowLiveIntervalsPass(PassRegistry&);
-extern char &SIFixControlFlowLiveIntervalsID;
+void initializeSIOptimizeExecMaskingPreRAPass(PassRegistry&);
+extern char &SIOptimizeExecMaskingPreRAID;
 
 void initializeAMDGPUAnnotateUniformValuesPass(PassRegistry&);
 extern char &AMDGPUAnnotateUniformValuesPassID;
@@ -162,6 +195,8 @@ extern char &AMDGPUUnifyDivergentExitNodesID;
 
 ImmutablePass *createAMDGPUAAWrapperPass();
 void initializeAMDGPUAAWrapperPassPass(PassRegistry&);
+
+void initializeAMDGPUArgumentUsageInfoPass(PassRegistry &);
 
 Target &getTheAMDGPUTarget();
 Target &getTheGCNTarget();
@@ -232,39 +267,5 @@ AMDGPUAS getAMDGPUAS(const TargetMachine &TM);
 AMDGPUAS getAMDGPUAS(Triple T);
 } // namespace AMDGPU
 } // namespace llvm
-
-/// AMDGPU-specific synchronization scopes.
-enum class AMDGPUSynchronizationScope : uint8_t {
-  /// Synchronized with respect to the entire system, which includes all
-  /// work-items on all agents executing kernel dispatches for the same
-  /// application process, together with all agents executing the same
-  /// application process as the executing work-item. Only supported for the
-  /// global segment.
-  System = llvm::CrossThread,
-
-  /// Synchronized with respect to signal handlers executing in the same
-  /// work-item.
-  SignalHandler = llvm::SingleThread,
-
-  /// Synchronized with respect to the agent, which includes all work-items on
-  /// the same agent executing kernel dispatches for the same application
-  /// process as the executing work-item. Only supported for the global segment.
-  Agent = llvm::SynchronizationScopeFirstTargetSpecific,
-
-  /// Synchronized with respect to the work-group, which includes all work-items
-  /// in the same work-group as the executing work-item.
-  WorkGroup,
-
-  /// Synchronized with respect to the wavefront, which includes all work-items
-  /// in the same wavefront as the executing work-item.
-  Wavefront,
-
-  /// Synchronized with respect to image fence instruction executing in the same
-  /// work-item.
-  Image,
-
-  /// Unknown synchronization scope.
-  Unknown
-};
 
 #endif

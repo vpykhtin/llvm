@@ -26,9 +26,9 @@
 #ifndef LLVM_IR_CALLSITE_H
 #define LLVM_IR_CALLSITE_H
 
-#include "llvm/ADT/iterator_range.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PointerIntPair.h"
+#include "llvm/ADT/iterator_range.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Function.h"
@@ -36,10 +36,10 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
+#include "llvm/Support/Casting.h"
 #include <cassert>
 #include <cstdint>
 #include <iterator>
@@ -426,6 +426,11 @@ public:
     CALLSITE_DELEGATE_GETTER(isNoBuiltin());
   }
 
+  /// Return true if the call requires strict floating point semantics.
+  bool isStrictFP() const {
+    CALLSITE_DELEGATE_GETTER(isStrictFP());
+  }
+
   /// Return true if the call should not be inlined.
   bool isNoInline() const {
     CALLSITE_DELEGATE_GETTER(isNoInline());
@@ -488,7 +493,7 @@ public:
     CALLSITE_DELEGATE_GETTER(cannotDuplicate());
   }
   void setCannotDuplicate() {
-    CALLSITE_DELEGATE_GETTER(setCannotDuplicate());
+    CALLSITE_DELEGATE_SETTER(setCannotDuplicate());
   }
 
   /// Determine if the call is convergent.

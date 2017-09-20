@@ -14,14 +14,15 @@
 
 #include "llvm/ToolDrivers/llvm-lib/LibDriver.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/BinaryFormat/Magic.h"
 #include "llvm/Object/ArchiveWriter.h"
 #include "llvm/Option/Arg.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Option/Option.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/StringSaver.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
+#include "llvm/Support/StringSaver.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
@@ -30,7 +31,7 @@ namespace {
 
 enum {
   OPT_INVALID = 0,
-#define OPTION(_1, _2, ID, _4, _5, _6, _7, _8, _9, _10, _11) OPT_##ID,
+#define OPTION(_1, _2, ID, _4, _5, _6, _7, _8, _9, _10, _11, _12) OPT_##ID,
 #include "Options.inc"
 #undef OPTION
 };
@@ -39,19 +40,17 @@ enum {
 #include "Options.inc"
 #undef PREFIX
 
-static const llvm::opt::OptTable::Info infoTable[] = {
-#define OPTION(X1, X2, ID, KIND, GROUP, ALIAS, X6, X7, X8, X9, X10)    \
-  {                                                                    \
-    X1, X2, X9, X10, OPT_##ID, llvm::opt::Option::KIND##Class, X8, X7, \
-    OPT_##GROUP, OPT_##ALIAS, X6                                       \
-  },
+static const llvm::opt::OptTable::Info InfoTable[] = {
+#define OPTION(X1, X2, ID, KIND, GROUP, ALIAS, X7, X8, X9, X10, X11, X12)      \
+  {X1, X2, X10,         X11,         OPT_##ID, llvm::opt::Option::KIND##Class, \
+   X9, X8, OPT_##GROUP, OPT_##ALIAS, X7,       X12},
 #include "Options.inc"
 #undef OPTION
 };
 
 class LibOptTable : public llvm::opt::OptTable {
 public:
-  LibOptTable() : OptTable(infoTable, true) {}
+  LibOptTable() : OptTable(InfoTable, true) {}
 };
 
 }
@@ -143,11 +142,10 @@ int llvm::libDriverMain(llvm::ArrayRef<const char*> ArgsArr) {
       });
       return 1;
     }
-    sys::fs::file_magic Magic =
-        sys::fs::identify_magic(MOrErr->Buf->getBuffer());
-    if (Magic != sys::fs::file_magic::coff_object &&
-        Magic != sys::fs::file_magic::bitcode &&
-        Magic != sys::fs::file_magic::windows_resource) {
+    llvm::file_magic Magic = llvm::identify_magic(MOrErr->Buf->getBuffer());
+    if (Magic != llvm::file_magic::coff_object &&
+        Magic != llvm::file_magic::bitcode &&
+        Magic != llvm::file_magic::windows_resource) {
       llvm::errs() << Arg->getValue()
                    << ": not a COFF object, bitcode or resource file\n";
       return 1;
@@ -155,15 +153,14 @@ int llvm::libDriverMain(llvm::ArrayRef<const char*> ArgsArr) {
     Members.emplace_back(std::move(*MOrErr));
   }
 
-  std::pair<StringRef, std::error_code> Result =
-      llvm::writeArchive(getOutputPath(&Args, Members[0]), Members,
+  std::string OutputPath = getOutputPath(&Args, Members[0]);
+  std::error_code EC =
+      llvm::writeArchive(OutputPath, Members,
                          /*WriteSymtab=*/true, object::Archive::K_GNU,
                          /*Deterministic*/ true, Args.hasArg(OPT_llvmlibthin));
 
-  if (Result.second) {
-    if (Result.first.empty())
-      Result.first = ArgsArr[0];
-    llvm::errs() << Result.first << ": " << Result.second.message() << "\n";
+  if (EC) {
+    llvm::errs() << OutputPath << ": " << EC.message() << "\n";
     return 1;
   }
 

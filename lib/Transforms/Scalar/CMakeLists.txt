@@ -22,7 +22,6 @@ add_llvm_library(LLVMScalarOpts
   LICM.cpp
   LoopAccessAnalysisPrinter.cpp
   LoopSink.cpp
-  LoadCombine.cpp
   LoopDeletion.cpp
   LoopDataPrefetch.cpp
   LoopDistribute.cpp
@@ -44,6 +43,7 @@ add_llvm_library(LLVMScalarOpts
   LowerExpectIntrinsic.cpp
   LowerGuardIntrinsic.cpp
   MemCpyOptimizer.cpp
+  MergeICmps.cpp
   MergedLoadStoreMotion.cpp
   NaryReassociate.cpp
   NewGVN.cpp

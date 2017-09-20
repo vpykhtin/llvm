@@ -184,7 +184,7 @@ Pass *createLoopInstSimplifyPass();
 //
 Pass *createLoopUnrollPass(int OptLevel = 2, int Threshold = -1, int Count = -1,
                            int AllowPartial = -1, int Runtime = -1,
-                           int UpperBound = -1);
+                           int UpperBound = -1, int AllowPeeling = -1);
 // Create an unrolling pass for full unrolling that uses exact trip count only.
 Pass *createSimpleLoopUnrollPass(int OptLevel = 2);
 
@@ -422,6 +422,12 @@ Pass *createLowerGuardIntrinsicPass();
 
 //===----------------------------------------------------------------------===//
 //
+// MergeICmps - Merge integer comparison chains
+//
+Pass *createMergeICmpsPass();
+
+//===----------------------------------------------------------------------===//
+//
 // ValuePropagation - Propagate CFG-derived value information
 //
 Pass *createCorrelatedValuePropagationPass();
@@ -493,12 +499,6 @@ FunctionPass *createSpeculativeExecutionPass();
 // Same as createSpeculativeExecutionPass, but does nothing unless
 // TargetTransformInfo::hasBranchDivergence() is true.
 FunctionPass *createSpeculativeExecutionIfHasBranchDivergencePass();
-
-//===----------------------------------------------------------------------===//
-//
-// LoadCombine - Combine loads into bigger loads.
-//
-BasicBlockPass *createLoadCombinePass();
 
 //===----------------------------------------------------------------------===//
 //

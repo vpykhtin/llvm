@@ -83,9 +83,9 @@ void WasmDumper::printRelocation(const SectionRef &Section,
 
   bool HasAddend = false;
   switch (RelocType) {
-  case wasm::R_WEBASSEMBLY_GLOBAL_ADDR_LEB:
-  case wasm::R_WEBASSEMBLY_GLOBAL_ADDR_SLEB:
-  case wasm::R_WEBASSEMBLY_GLOBAL_ADDR_I32:
+  case wasm::R_WEBASSEMBLY_MEMORY_ADDR_LEB:
+  case wasm::R_WEBASSEMBLY_MEMORY_ADDR_SLEB:
+  case wasm::R_WEBASSEMBLY_MEMORY_ADDR_I32:
     HasAddend = true;
     break;
   default:
@@ -153,6 +153,12 @@ void WasmDumper::printSections() {
     switch (WasmSec.Type) {
     case wasm::WASM_SEC_CUSTOM:
       W.printString("Name", WasmSec.Name);
+      if (WasmSec.Name == "linking") {
+        const wasm::WasmLinkingData &LinkingData = Obj->linkingData();
+        W.printNumber("DataSize", LinkingData.DataSize);
+        if (LinkingData.DataAlignment)
+          W.printNumber("DataAlignment", LinkingData.DataAlignment);
+      }
       break;
     case wasm::WASM_SEC_MEMORY:
       ListScope Group(W, "Memories");
@@ -183,6 +189,7 @@ void WasmDumper::printSymbol(const SymbolRef &Sym) {
   WasmSymbol Symbol = Obj->getWasmSymbol(Sym.getRawDataRefImpl());
   W.printString("Name", Symbol.Name);
   W.printEnum("Type", static_cast<unsigned>(Symbol.Type), makeArrayRef(WasmSymbolTypes));
+  W.printHex("Flags", Symbol.Flags);
 }
 
 }

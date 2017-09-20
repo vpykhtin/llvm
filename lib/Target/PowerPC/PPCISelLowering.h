@@ -37,6 +37,14 @@ namespace llvm {
 
   namespace PPCISD {
 
+    // When adding a NEW PPCISD node please add it to the correct position in
+    // the enum. The order of elements in this enum matters!
+    // Values that are added after this entry:
+    //     STBRX = ISD::FIRST_TARGET_MEMORY_OPCODE
+    // are considerd memory opcodes and are treated differently than entries
+    // that come before it. For example, ADD or MUL should be placed before
+    // the ISD::FIRST_TARGET_MEMORY_OPCODE while a LOAD or STORE should come
+    // after it.
     enum NodeType : unsigned {
       // Start the numbering where the builtin ops and target ops leave off.
       FIRST_NUMBER = ISD::BUILTIN_OP_END,
@@ -67,6 +75,10 @@ namespace llvm {
       /// VSFRC that is sign-extended from ByteWidth to a 64-byte integer.
       VEXTS,
 
+      /// SExtVElems, takes an input vector of a smaller type and sign
+      /// extends to an output vector of a larger type.
+      SExtVElems,
+
       /// Reciprocal estimate instructions (unary FP ops).
       FRE, FRSQRTE,
 
@@ -85,6 +97,10 @@ namespace llvm {
       /// XXINSERT - The PPC VSX insert instruction
       ///
       XXINSERT,
+
+      /// XXREVERSE - The PPC VSX reverse instruction
+      ///
+      XXREVERSE,
 
       /// VECSHL - The PPC VSX shift left instruction
       ///
@@ -458,6 +474,23 @@ namespace llvm {
     /// for a XXSLDWI instruction.
     bool isXXSLDWIShuffleMask(ShuffleVectorSDNode *N, unsigned &ShiftElts,
                               bool &Swap, bool IsLE);
+
+    /// isXXBRHShuffleMask - Return true if this is a shuffle mask suitable
+    /// for a XXBRH instruction.
+    bool isXXBRHShuffleMask(ShuffleVectorSDNode *N);
+
+    /// isXXBRWShuffleMask - Return true if this is a shuffle mask suitable
+    /// for a XXBRW instruction.
+    bool isXXBRWShuffleMask(ShuffleVectorSDNode *N);
+
+    /// isXXBRDShuffleMask - Return true if this is a shuffle mask suitable
+    /// for a XXBRD instruction.
+    bool isXXBRDShuffleMask(ShuffleVectorSDNode *N);
+
+    /// isXXBRQShuffleMask - Return true if this is a shuffle mask suitable
+    /// for a XXBRQ instruction.
+    bool isXXBRQShuffleMask(ShuffleVectorSDNode *N);
+
     /// isXXPERMDIShuffleMask - Return true if this is a shuffle mask suitable
     /// for a XXPERMDI instruction.
     bool isXXPERMDIShuffleMask(ShuffleVectorSDNode *N, unsigned &ShiftElts,
@@ -591,7 +624,7 @@ namespace llvm {
     /// is not better represented as reg+reg.  If Aligned is true, only accept
     /// displacements suitable for STD and friends, i.e. multiples of 4.
     bool SelectAddressRegImm(SDValue N, SDValue &Disp, SDValue &Base,
-                             SelectionDAG &DAG, bool Aligned) const;
+                             SelectionDAG &DAG, unsigned Alignment) const;
 
     /// SelectAddressRegRegOnly - Given the specified addressed, force it to be
     /// represented as an indexed [r+r] operation.
@@ -702,7 +735,8 @@ namespace llvm {
     /// isLegalAddressingMode - Return true if the addressing mode represented
     /// by AM is legal for this target, for a load/store of the specified type.
     bool isLegalAddressingMode(const DataLayout &DL, const AddrMode &AM,
-                               Type *Ty, unsigned AS) const override;
+                               Type *Ty, unsigned AS,
+                               Instruction *I = nullptr) const override;
 
     /// isLegalICmpImmediate - Return true if the specified immediate is legal
     /// icmp immediate, that is the target has icmp instructions which can
@@ -731,7 +765,7 @@ namespace llvm {
     bool shouldConvertConstantLoadToIntImm(const APInt &Imm,
                                            Type *Ty) const override;
 
-    bool convertSelectOfConstantsToMath() const override {
+    bool convertSelectOfConstantsToMath(EVT VT) const override {
       return true;
     }
 
@@ -873,7 +907,7 @@ namespace llvm {
     IsEligibleForTailCallOptimization_64SVR4(
                                     SDValue Callee,
                                     CallingConv::ID CalleeCC,
-                                    ImmutableCallSite *CS,
+                                    ImmutableCallSite CS,
                                     bool isVarArg,
                                     const SmallVectorImpl<ISD::OutputArg> &Outs,
                                     const SmallVectorImpl<ISD::InputArg> &Ins,
@@ -918,6 +952,7 @@ namespace llvm {
     SDValue LowerEXTRACT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerINTRINSIC_VOID(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerREM(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerSCALAR_TO_VECTOR(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerSIGN_EXTEND_INREG(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerMUL(SDValue Op, SelectionDAG &DAG) const;
@@ -938,7 +973,7 @@ namespace llvm {
                        SDValue &Callee, int SPDiff, unsigned NumBytes,
                        const SmallVectorImpl<ISD::InputArg> &Ins,
                        SmallVectorImpl<SDValue> &InVals,
-                       ImmutableCallSite *CS) const;
+                       ImmutableCallSite CS) const;
 
     SDValue
     LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
@@ -989,7 +1024,7 @@ namespace llvm {
                              const SmallVectorImpl<ISD::InputArg> &Ins,
                              const SDLoc &dl, SelectionDAG &DAG,
                              SmallVectorImpl<SDValue> &InVals,
-                             ImmutableCallSite *CS) const;
+                             ImmutableCallSite CS) const;
     SDValue LowerCall_64SVR4(SDValue Chain, SDValue Callee,
                              CallingConv::ID CallConv, bool isVarArg,
                              bool isTailCall, bool isPatchPoint,
@@ -998,7 +1033,7 @@ namespace llvm {
                              const SmallVectorImpl<ISD::InputArg> &Ins,
                              const SDLoc &dl, SelectionDAG &DAG,
                              SmallVectorImpl<SDValue> &InVals,
-                             ImmutableCallSite *CS) const;
+                             ImmutableCallSite CS) const;
     SDValue LowerCall_32SVR4(SDValue Chain, SDValue Callee,
                              CallingConv::ID CallConv, bool isVarArg,
                              bool isTailCall, bool isPatchPoint,
@@ -1007,7 +1042,7 @@ namespace llvm {
                              const SmallVectorImpl<ISD::InputArg> &Ins,
                              const SDLoc &dl, SelectionDAG &DAG,
                              SmallVectorImpl<SDValue> &InVals,
-                             ImmutableCallSite *CS) const;
+                             ImmutableCallSite CS) const;
 
     SDValue lowerEH_SJLJ_SETJMP(SDValue Op, SelectionDAG &DAG) const;
     SDValue lowerEH_SJLJ_LONGJMP(SDValue Op, SelectionDAG &DAG) const;
@@ -1069,6 +1104,9 @@ namespace llvm {
                                            CCValAssign::LocInfo &LocInfo,
                                            ISD::ArgFlagsTy &ArgFlags,
                                            CCState &State);
+
+  bool isIntS16Immediate(SDNode *N, int16_t &Imm);
+  bool isIntS16Immediate(SDValue Op, int16_t &Imm);
 
 } // end namespace llvm
 

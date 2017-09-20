@@ -15,8 +15,8 @@
 #include "X86InstComments.h"
 #include "MCTargetDesc/X86MCTargetDesc.h"
 #include "Utils/X86ShuffleDecode.h"
-#include "llvm/MC/MCInst.h"
 #include "llvm/CodeGen/MachineValueType.h"
+#include "llvm/MC/MCInst.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
@@ -1038,7 +1038,7 @@ bool llvm::EmitAnyX86InstComments(const MCInst *MI, raw_ostream &OS,
   case X86::EXTRQI:
     if (MI->getOperand(2).isImm() &&
         MI->getOperand(3).isImm())
-      DecodeEXTRQIMask(MI->getOperand(2).getImm(),
+      DecodeEXTRQIMask(MVT::v16i8, MI->getOperand(2).getImm(),
                        MI->getOperand(3).getImm(),
                        ShuffleMask);
 
@@ -1049,7 +1049,7 @@ bool llvm::EmitAnyX86InstComments(const MCInst *MI, raw_ostream &OS,
   case X86::INSERTQI:
     if (MI->getOperand(3).isImm() &&
         MI->getOperand(4).isImm())
-      DecodeINSERTQIMask(MI->getOperand(3).getImm(),
+      DecodeINSERTQIMask(MVT::v16i8, MI->getOperand(3).getImm(),
                          MI->getOperand(4).getImm(),
                          ShuffleMask);
 

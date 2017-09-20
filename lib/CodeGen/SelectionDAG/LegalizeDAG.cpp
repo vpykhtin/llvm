@@ -907,6 +907,7 @@ getStrictFPOpcodeAction(const TargetLowering &TLI, unsigned Opcode, EVT VT) {
     case ISD::STRICT_FSQRT: EqOpc = ISD::FSQRT; break;
     case ISD::STRICT_FPOW: EqOpc = ISD::FPOW; break;
     case ISD::STRICT_FPOWI: EqOpc = ISD::FPOWI; break;
+    case ISD::STRICT_FMA: EqOpc = ISD::FMA; break;
     case ISD::STRICT_FSIN: EqOpc = ISD::FSIN; break;
     case ISD::STRICT_FCOS: EqOpc = ISD::FCOS; break;
     case ISD::STRICT_FEXP: EqOpc = ISD::FEXP; break;
@@ -1072,6 +1073,7 @@ void SelectionDAGLegalize::LegalizeOp(SDNode *Node) {
     }
     break;
   case ISD::STRICT_FSQRT:
+  case ISD::STRICT_FMA:
   case ISD::STRICT_FPOW:
   case ISD::STRICT_FPOWI:
   case ISD::STRICT_FSIN:
@@ -1240,7 +1242,7 @@ SDValue SelectionDAGLegalize::ExpandExtractFromVectorThroughStack(SDValue Op) {
       // If the index is dependent on the store we will introduce a cycle when
       // creating the load (the load uses the index, and by replacing the chain
       // we will make the index dependent on the load). Also, the store might be
-      // dependent on the extractelement and introduce a cycle when creating 
+      // dependent on the extractelement and introduce a cycle when creating
       // the load.
       if (SDNode::hasPredecessorHelper(ST, Visited, Worklist) ||
           ST->hasPredecessor(Op.getNode()))
@@ -1991,7 +1993,8 @@ SDValue SelectionDAGLegalize::ExpandLibCall(RTLIB::Libcall LC, SDNode *Node,
                     std::move(Args))
       .setTailCall(isTailCall)
       .setSExtResult(isSigned)
-      .setZExtResult(!isSigned);
+      .setZExtResult(!isSigned)
+      .setIsPostTypeLegalization(true);
 
   std::pair<SDValue, SDValue> CallInfo = TLI.LowerCallTo(CLI);
 
@@ -2029,7 +2032,8 @@ SDValue SelectionDAGLegalize::ExpandLibCall(RTLIB::Libcall LC, EVT RetVT,
       .setLibCallee(TLI.getLibcallCallingConv(LC), RetTy, Callee,
                     std::move(Args))
       .setSExtResult(isSigned)
-      .setZExtResult(!isSigned);
+      .setZExtResult(!isSigned)
+      .setIsPostTypeLegalization(true);
 
   std::pair<SDValue,SDValue> CallInfo = TLI.LowerCallTo(CLI);
 
@@ -2190,19 +2194,6 @@ static bool isSinCosLibcallAvailable(SDNode *Node, const TargetLowering &TLI) {
   case MVT::ppcf128: LC = RTLIB::SINCOS_PPCF128; break;
   }
   return TLI.getLibcallName(LC) != nullptr;
-}
-
-/// Return true if sincos libcall is available and can be used to combine sin
-/// and cos.
-static bool canCombineSinCosLibcall(SDNode *Node, const TargetLowering &TLI,
-                                    const TargetMachine &TM) {
-  if (!isSinCosLibcallAvailable(Node, TLI))
-    return false;
-  // GNU sin/cos functions set errno while sincos does not. Therefore
-  // combining sin and cos is only safe if unsafe-fpmath is enabled.
-  if (TM.getTargetTriple().isGNUEnvironment() && !TM.Options.UnsafeFPMath)
-    return false;
-  return true;
 }
 
 /// Only issue sincos libcall if both sin and cos are needed.
@@ -3247,7 +3238,7 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
     // Turn fsin / fcos into ISD::FSINCOS node if there are a pair of fsin /
     // fcos which share the same operand and both are used.
     if ((TLI.isOperationLegalOrCustom(ISD::FSINCOS, VT) ||
-         canCombineSinCosLibcall(Node, TLI, TM))
+         isSinCosLibcallAvailable(Node, TLI))
         && useSinCos(Node)) {
       SDVTList VTs = DAG.getVTList(VT, VT);
       Tmp1 = DAG.getNode(ISD::FSINCOS, dl, VTs, Node->getOperand(0));
@@ -3543,17 +3534,24 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
         LC = RTLIB::MUL_I128;
       assert(LC != RTLIB::UNKNOWN_LIBCALL && "Cannot expand this operation!");
 
-      // The high part is obtained by SRA'ing all but one of the bits of low
-      // part.
-      unsigned LoSize = VT.getSizeInBits();
-      SDValue HiLHS =
-          DAG.getNode(ISD::SRA, dl, VT, LHS,
-                      DAG.getConstant(LoSize - 1, dl,
-                                      TLI.getPointerTy(DAG.getDataLayout())));
-      SDValue HiRHS =
-          DAG.getNode(ISD::SRA, dl, VT, RHS,
-                      DAG.getConstant(LoSize - 1, dl,
-                                      TLI.getPointerTy(DAG.getDataLayout())));
+      SDValue HiLHS;
+      SDValue HiRHS;
+      if (isSigned) {
+        // The high part is obtained by SRA'ing all but one of the bits of low
+        // part.
+        unsigned LoSize = VT.getSizeInBits();
+        HiLHS =
+            DAG.getNode(ISD::SRA, dl, VT, LHS,
+                        DAG.getConstant(LoSize - 1, dl,
+                                        TLI.getPointerTy(DAG.getDataLayout())));
+        HiRHS =
+            DAG.getNode(ISD::SRA, dl, VT, RHS,
+                        DAG.getConstant(LoSize - 1, dl,
+                                        TLI.getPointerTy(DAG.getDataLayout())));
+      } else {
+          HiLHS = DAG.getConstant(0, dl, VT);
+          HiRHS = DAG.getConstant(0, dl, VT);
+      }
 
       // Here we're passing the 2 arguments explicitly as 4 arguments that are
       // pre-lowered to the correct types. This all depends upon WideVT not
@@ -3571,16 +3569,10 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
         SDValue Args[] = { HiLHS, LHS, HiRHS, RHS };
         Ret = ExpandLibCall(LC, WideVT, Args, 4, isSigned, dl);
       }
-      BottomHalf = DAG.getNode(ISD::EXTRACT_ELEMENT, dl, VT, Ret,
-                               DAG.getIntPtrConstant(0, dl));
-      TopHalf = DAG.getNode(ISD::EXTRACT_ELEMENT, dl, VT, Ret,
-                            DAG.getIntPtrConstant(1, dl));
-      // Ret is a node with an illegal type. Because such things are not
-      // generally permitted during this phase of legalization, make sure the
-      // node has no more uses. The above EXTRACT_ELEMENT nodes should have been
-      // folded.
-      assert(Ret->use_empty() &&
-             "Unexpected uses of illegally type from expanded lib call.");
+      assert(Ret.getOpcode() == ISD::MERGE_VALUES &&
+             "Ret value is a collection of constituent nodes holding result.");
+      BottomHalf = Ret.getOperand(0);
+      TopHalf = Ret.getOperand(1);
     }
 
     if (isSigned) {
@@ -3676,10 +3668,15 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
                          Tmp2.getOperand(0), Tmp2.getOperand(1),
                          Node->getOperand(2));
     } else {
-      // We test only the i1 bit.  Skip the AND if UNDEF.
-      Tmp3 = (Tmp2.isUndef()) ? Tmp2 :
-        DAG.getNode(ISD::AND, dl, Tmp2.getValueType(), Tmp2,
-                    DAG.getConstant(1, dl, Tmp2.getValueType()));
+      // We test only the i1 bit.  Skip the AND if UNDEF or another AND.
+      if (Tmp2.isUndef() ||
+          (Tmp2.getOpcode() == ISD::AND &&
+           isa<ConstantSDNode>(Tmp2.getOperand(1)) &&
+           dyn_cast<ConstantSDNode>(Tmp2.getOperand(1))->getZExtValue() == 1))
+        Tmp3 = Tmp2;
+      else
+        Tmp3 = DAG.getNode(ISD::AND, dl, Tmp2.getValueType(), Tmp2,
+                           DAG.getConstant(1, dl, Tmp2.getValueType()));
       Tmp1 = DAG.getNode(ISD::BR_CC, dl, MVT::Other, Tmp1,
                          DAG.getCondCode(ISD::SETNE), Tmp3,
                          DAG.getConstant(0, dl, Tmp3.getValueType()),
@@ -4067,6 +4064,7 @@ void SelectionDAGLegalize::ConvertNodeToLibcall(SDNode *Node) {
                                       RTLIB::REM_PPCF128));
     break;
   case ISD::FMA:
+  case ISD::STRICT_FMA:
     Results.push_back(ExpandFPLibCall(Node, RTLIB::FMA_F32, RTLIB::FMA_F64,
                                       RTLIB::FMA_F80, RTLIB::FMA_F128,
                                       RTLIB::FMA_PPCF128));
@@ -4598,6 +4596,14 @@ void SelectionDAG::Legalize() {
   AssignTopologicalOrder();
 
   SmallPtrSet<SDNode *, 16> LegalizedNodes;
+  // Use a delete listener to remove nodes which were deleted during
+  // legalization from LegalizeNodes. This is needed to handle the situation
+  // where a new node is allocated by the object pool to the same address of a
+  // previously deleted node.
+  DAGNodeDeletedListener DeleteListener(
+      *this,
+      [&LegalizedNodes](SDNode *N, SDNode *E) { LegalizedNodes.erase(N); });
+
   SelectionDAGLegalize Legalizer(*this, LegalizedNodes);
 
   // Visit all the nodes. We start in topological order, so that we see

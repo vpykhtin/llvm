@@ -48,23 +48,29 @@ set(LLVM_TEST_DEPENDS
           llvm-cvtres
           llvm-diff
           llvm-dis
+          llvm-dlltool
           llvm-dsymutil
           llvm-dwarfdump
           llvm-dwp
           llvm-extract
+          llvm-isel-fuzzer
           llvm-lib
           llvm-link
           llvm-lto2
           llvm-mc
           llvm-mcmarkup
           llvm-modextract
+          llvm-mt
           llvm-nm
+          llvm-objcopy
           llvm-objdump
           llvm-opt-report
-          llvm-pdbdump
+          llvm-pdbutil
           llvm-profdata
           llvm-ranlib
+          llvm-rc
           llvm-readobj
+          llvm-readelf
           llvm-rtdyld
           llvm-size
           llvm-split

@@ -28,8 +28,8 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/AutoUpgrade.h"
 #include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/CallSite.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Comdat.h"
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
@@ -40,13 +40,13 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GVMaterializer.h"
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/GlobalIFunc.h"
 #include "llvm/IR/GlobalIndirectSymbol.h"
 #include "llvm/IR/GlobalObject.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/GlobalVariable.h"
-#include "llvm/IR/GVMaterializer.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstrTypes.h"
@@ -513,6 +513,7 @@ class BitcodeReader : public BitcodeReaderBase, public GVMaterializer {
   TBAAVerifier TBAAVerifyHelper;
 
   std::vector<std::string> BundleTags;
+  SmallVector<SyncScope::ID, 8> SSIDs;
 
 public:
   BitcodeReader(BitstreamCursor Stream, StringRef Strtab,
@@ -648,6 +649,7 @@ private:
   Error parseTypeTable();
   Error parseTypeTableBody();
   Error parseOperandBundleTags();
+  Error parseSyncScopeNames();
 
   Expected<Value *> recordValue(SmallVectorImpl<uint64_t> &Record,
                                 unsigned NameIndex, Triple &TT);
@@ -668,6 +670,8 @@ private:
   Error findFunctionInStream(
       Function *F,
       DenseMap<Function *, uint64_t>::iterator DeferredFunctionInfoIterator);
+
+  SyncScope::ID getDecodedSyncScopeID(unsigned Val);
 };
 
 /// Class to manage reading and parsing function summary index bitcode
@@ -733,13 +737,13 @@ private:
   std::vector<FunctionSummary::EdgeTy> makeCallList(ArrayRef<uint64_t> Record,
                                                     bool IsOldProfileFormat,
                                                     bool HasProfile);
-  Error parseEntireSummary();
+  Error parseEntireSummary(unsigned ID);
   Error parseModuleStringTable();
 
   std::pair<ValueInfo, GlobalValue::GUID>
   getValueInfoFromValueId(unsigned ValueId);
 
-  ModulePathStringTableTy::iterator addThisModulePath();
+  ModuleSummaryIndex::ModuleInfo *addThisModule();
 };
 
 } // end anonymous namespace
@@ -856,6 +860,15 @@ static GlobalValue::LinkageTypes getDecodedLinkage(unsigned Val) {
   }
 }
 
+static FunctionSummary::FFlags getDecodedFFlags(uint64_t RawFlags) {
+  FunctionSummary::FFlags Flags;
+  Flags.ReadNone = RawFlags & 0x1;
+  Flags.ReadOnly = (RawFlags >> 1) & 0x1;
+  Flags.NoRecurse = (RawFlags >> 2) & 0x1;
+  Flags.ReturnDoesNotAlias = (RawFlags >> 3) & 0x1;
+  return Flags;
+}
+
 /// Decode the flags for GlobalValue in the summary.
 static GlobalValueSummary::GVFlags getDecodedGVSummaryFlags(uint64_t RawFlags,
                                                             uint64_t Version) {
@@ -865,11 +878,11 @@ static GlobalValueSummary::GVFlags getDecodedGVSummaryFlags(uint64_t RawFlags,
   auto Linkage = GlobalValue::LinkageTypes(RawFlags & 0xF); // 4 bits
   RawFlags = RawFlags >> 4;
   bool NotEligibleToImport = (RawFlags & 0x1) || Version < 3;
-  // The LiveRoot flag wasn't introduced until version 3. For dead stripping
+  // The Live flag wasn't introduced until version 3. For dead stripping
   // to work correctly on earlier versions, we must conservatively treat all
   // values as live.
-  bool LiveRoot = (RawFlags & 0x2) || Version < 3;
-  return GlobalValueSummary::GVFlags(Linkage, NotEligibleToImport, LiveRoot);
+  bool Live = (RawFlags & 0x2) || Version < 3;
+  return GlobalValueSummary::GVFlags(Linkage, NotEligibleToImport, Live);
 }
 
 static GlobalValue::VisibilityTypes getDecodedVisibility(unsigned Val) {
@@ -995,20 +1008,6 @@ static AtomicOrdering getDecodedOrdering(unsigned Val) {
   case bitc::ORDERING_ACQREL: return AtomicOrdering::AcquireRelease;
   default: // Map unknown orderings to sequentially-consistent.
   case bitc::ORDERING_SEQCST: return AtomicOrdering::SequentiallyConsistent;
-  }
-}
-
-static SynchronizationScope getDecodedSynchScope(unsigned Val) {
-  if (Val >= bitc::SYNCHSCOPE_FIRSTTARGETSPECIFIC) {
-    assert(Val == uint8_t(Val) && "expected 8-bit integer (too large)");
-    return SynchronizationScope(SynchronizationScopeFirstTargetSpecific +
-        (Val - bitc::SYNCHSCOPE_FIRSTTARGETSPECIFIC));
-  }
-
-  switch (Val) {
-  default: llvm_unreachable("Invalid syncscope");
-  case bitc::SYNCHSCOPE_SINGLETHREAD: return SingleThread;
-  case bitc::SYNCHSCOPE_CROSSTHREAD: return CrossThread;
   }
 }
 
@@ -1138,6 +1137,7 @@ static uint64_t getRawAttributeMask(Attribute::AttrKind Val) {
   case Attribute::SwiftError:      return 1ULL << 52;
   case Attribute::WriteOnly:       return 1ULL << 53;
   case Attribute::Speculatable:    return 1ULL << 54;
+  case Attribute::StrictFP:        return 1ULL << 55;
   case Attribute::Dereferenceable:
     llvm_unreachable("dereferenceable attribute not supported in raw format");
     break;
@@ -1346,6 +1346,8 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::StackProtectStrong;
   case bitc::ATTR_KIND_SAFESTACK:
     return Attribute::SafeStack;
+  case bitc::ATTR_KIND_STRICT_FP:
+    return Attribute::StrictFP;
   case bitc::ATTR_KIND_STRUCT_RET:
     return Attribute::StructRet;
   case bitc::ATTR_KIND_SANITIZE_ADDRESS:
@@ -1747,6 +1749,44 @@ Error BitcodeReader::parseOperandBundleTags() {
     BundleTags.emplace_back();
     if (convertToString(Record, 0, BundleTags.back()))
       return error("Invalid record");
+    Record.clear();
+  }
+}
+
+Error BitcodeReader::parseSyncScopeNames() {
+  if (Stream.EnterSubBlock(bitc::SYNC_SCOPE_NAMES_BLOCK_ID))
+    return error("Invalid record");
+
+  if (!SSIDs.empty())
+    return error("Invalid multiple synchronization scope names blocks");
+
+  SmallVector<uint64_t, 64> Record;
+  while (true) {
+    BitstreamEntry Entry = Stream.advanceSkippingSubblocks();
+    switch (Entry.Kind) {
+    case BitstreamEntry::SubBlock: // Handled for us already.
+    case BitstreamEntry::Error:
+      return error("Malformed block");
+    case BitstreamEntry::EndBlock:
+      if (SSIDs.empty())
+        return error("Invalid empty synchronization scope names block");
+      return Error::success();
+    case BitstreamEntry::Record:
+      // The interesting case.
+      break;
+    }
+
+    // Synchronization scope names are implicitly mapped to synchronization
+    // scope IDs by their order.
+
+    if (Stream.readRecord(Entry.ID, Record) != bitc::SYNC_SCOPE_NAME)
+      return error("Invalid record");
+
+    SmallString<16> SSN;
+    if (convertToString(Record, 0, SSN))
+      return error("Invalid record");
+
+    SSIDs.push_back(Context.getOrInsertSyncScopeID(SSN));
     Record.clear();
   }
 }
@@ -2614,6 +2654,16 @@ Error BitcodeReader::materializeMetadata() {
     if (Error Err = MDLoader->parseModuleMetadata())
       return Err;
   }
+
+  // Upgrade "Linker Options" module flag to "llvm.linker.options" module-level
+  // metadata.
+  if (Metadata *Val = TheModule->getModuleFlag("Linker Options")) {
+    NamedMDNode *LinkerOpts =
+        TheModule->getOrInsertNamedMetadata("llvm.linker.options");
+    for (const MDOperand &MDOptions : cast<MDNode>(Val)->operands())
+      LinkerOpts->addOperand(cast<MDNode>(MDOptions));
+  }
+
   DeferredMetadataInfo.clear();
   return Error::success();
 }
@@ -3126,6 +3176,10 @@ Error BitcodeReader::parseModule(uint64_t ResumeBit,
         break;
       case bitc::OPERAND_BUNDLE_TAGS_BLOCK_ID:
         if (Error Err = parseOperandBundleTags())
+          return Err;
+        break;
+      case bitc::SYNC_SCOPE_NAMES_BLOCK_ID:
+        if (Error Err = parseSyncScopeNames())
           return Err;
         break;
       }
@@ -4200,7 +4254,7 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
       break;
     }
     case bitc::FUNC_CODE_INST_LOADATOMIC: {
-       // LOADATOMIC: [opty, op, align, vol, ordering, synchscope]
+       // LOADATOMIC: [opty, op, align, vol, ordering, ssid]
       unsigned OpNum = 0;
       Value *Op;
       if (getValueTypePair(Record, OpNum, NextValueNo, Op) ||
@@ -4222,12 +4276,12 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
         return error("Invalid record");
       if (Ordering != AtomicOrdering::NotAtomic && Record[OpNum] == 0)
         return error("Invalid record");
-      SynchronizationScope SynchScope = getDecodedSynchScope(Record[OpNum + 3]);
+      SyncScope::ID SSID = getDecodedSyncScopeID(Record[OpNum + 3]);
 
       unsigned Align;
       if (Error Err = parseAlignmentValue(Record[OpNum], Align))
         return Err;
-      I = new LoadInst(Op, "", Record[OpNum+1], Align, Ordering, SynchScope);
+      I = new LoadInst(Op, "", Record[OpNum+1], Align, Ordering, SSID);
 
       InstructionList.push_back(I);
       break;
@@ -4256,7 +4310,7 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
     }
     case bitc::FUNC_CODE_INST_STOREATOMIC:
     case bitc::FUNC_CODE_INST_STOREATOMIC_OLD: {
-      // STOREATOMIC: [ptrty, ptr, val, align, vol, ordering, synchscope]
+      // STOREATOMIC: [ptrty, ptr, val, align, vol, ordering, ssid]
       unsigned OpNum = 0;
       Value *Val, *Ptr;
       if (getValueTypePair(Record, OpNum, NextValueNo, Ptr) ||
@@ -4276,20 +4330,20 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
           Ordering == AtomicOrdering::Acquire ||
           Ordering == AtomicOrdering::AcquireRelease)
         return error("Invalid record");
-      SynchronizationScope SynchScope = getDecodedSynchScope(Record[OpNum + 3]);
+      SyncScope::ID SSID = getDecodedSyncScopeID(Record[OpNum + 3]);
       if (Ordering != AtomicOrdering::NotAtomic && Record[OpNum] == 0)
         return error("Invalid record");
 
       unsigned Align;
       if (Error Err = parseAlignmentValue(Record[OpNum], Align))
         return Err;
-      I = new StoreInst(Val, Ptr, Record[OpNum+1], Align, Ordering, SynchScope);
+      I = new StoreInst(Val, Ptr, Record[OpNum+1], Align, Ordering, SSID);
       InstructionList.push_back(I);
       break;
     }
     case bitc::FUNC_CODE_INST_CMPXCHG_OLD:
     case bitc::FUNC_CODE_INST_CMPXCHG: {
-      // CMPXCHG:[ptrty, ptr, cmp, new, vol, successordering, synchscope,
+      // CMPXCHG:[ptrty, ptr, cmp, new, vol, successordering, ssid,
       //          failureordering?, isweak?]
       unsigned OpNum = 0;
       Value *Ptr, *Cmp, *New;
@@ -4306,7 +4360,7 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
       if (SuccessOrdering == AtomicOrdering::NotAtomic ||
           SuccessOrdering == AtomicOrdering::Unordered)
         return error("Invalid record");
-      SynchronizationScope SynchScope = getDecodedSynchScope(Record[OpNum + 2]);
+      SyncScope::ID SSID = getDecodedSyncScopeID(Record[OpNum + 2]);
 
       if (Error Err = typeCheckLoadStoreInst(Cmp->getType(), Ptr->getType()))
         return Err;
@@ -4318,7 +4372,7 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
         FailureOrdering = getDecodedOrdering(Record[OpNum + 3]);
 
       I = new AtomicCmpXchgInst(Ptr, Cmp, New, SuccessOrdering, FailureOrdering,
-                                SynchScope);
+                                SSID);
       cast<AtomicCmpXchgInst>(I)->setVolatile(Record[OpNum]);
 
       if (Record.size() < 8) {
@@ -4335,7 +4389,7 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
       break;
     }
     case bitc::FUNC_CODE_INST_ATOMICRMW: {
-      // ATOMICRMW:[ptrty, ptr, val, op, vol, ordering, synchscope]
+      // ATOMICRMW:[ptrty, ptr, val, op, vol, ordering, ssid]
       unsigned OpNum = 0;
       Value *Ptr, *Val;
       if (getValueTypePair(Record, OpNum, NextValueNo, Ptr) ||
@@ -4352,13 +4406,13 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
       if (Ordering == AtomicOrdering::NotAtomic ||
           Ordering == AtomicOrdering::Unordered)
         return error("Invalid record");
-      SynchronizationScope SynchScope = getDecodedSynchScope(Record[OpNum + 3]);
-      I = new AtomicRMWInst(Operation, Ptr, Val, Ordering, SynchScope);
+      SyncScope::ID SSID = getDecodedSyncScopeID(Record[OpNum + 3]);
+      I = new AtomicRMWInst(Operation, Ptr, Val, Ordering, SSID);
       cast<AtomicRMWInst>(I)->setVolatile(Record[OpNum+1]);
       InstructionList.push_back(I);
       break;
     }
-    case bitc::FUNC_CODE_INST_FENCE: { // FENCE:[ordering, synchscope]
+    case bitc::FUNC_CODE_INST_FENCE: { // FENCE:[ordering, ssid]
       if (2 != Record.size())
         return error("Invalid record");
       AtomicOrdering Ordering = getDecodedOrdering(Record[0]);
@@ -4366,8 +4420,8 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
           Ordering == AtomicOrdering::Unordered ||
           Ordering == AtomicOrdering::Monotonic)
         return error("Invalid record");
-      SynchronizationScope SynchScope = getDecodedSynchScope(Record[1]);
-      I = new FenceInst(Context, Ordering, SynchScope);
+      SyncScope::ID SSID = getDecodedSyncScopeID(Record[1]);
+      I = new FenceInst(Context, Ordering, SSID);
       InstructionList.push_back(I);
       break;
     }
@@ -4563,6 +4617,14 @@ Error BitcodeReader::findFunctionInStream(
   return Error::success();
 }
 
+SyncScope::ID BitcodeReader::getDecodedSyncScopeID(unsigned Val) {
+  if (Val == SyncScope::SingleThread || Val == SyncScope::System)
+    return SyncScope::ID(Val);
+  if (Val >= SSIDs.size())
+    return SyncScope::System; // Map unknown synchronization scopes to system.
+  return SSIDs[Val];
+}
+
 //===----------------------------------------------------------------------===//
 // GVMaterializer implementation
 //===----------------------------------------------------------------------===//
@@ -4697,9 +4759,9 @@ ModuleSummaryIndexBitcodeReader::ModuleSummaryIndexBitcodeReader(
     : BitcodeReaderBase(std::move(Cursor), Strtab), TheIndex(TheIndex),
       ModulePath(ModulePath), ModuleId(ModuleId) {}
 
-ModulePathStringTableTy::iterator
-ModuleSummaryIndexBitcodeReader::addThisModulePath() {
-  return TheIndex.addModulePath(ModulePath, ModuleId);
+ModuleSummaryIndex::ModuleInfo *
+ModuleSummaryIndexBitcodeReader::addThisModule() {
+  return TheIndex.addModule(ModulePath, ModuleId);
 }
 
 std::pair<ValueInfo, GlobalValue::GUID>
@@ -4850,6 +4912,7 @@ Error ModuleSummaryIndexBitcodeReader::parseModule() {
           return error("Invalid record");
         break;
       case bitc::GLOBALVAL_SUMMARY_BLOCK_ID:
+      case bitc::FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID:
         assert(!SeenValueSymbolTable &&
                "Already read VST when parsing summary block?");
         // We might not have a VST if there were no values in the
@@ -4862,7 +4925,7 @@ Error ModuleSummaryIndexBitcodeReader::parseModule() {
           SeenValueSymbolTable = true;
         }
         SeenGlobalValSummary = true;
-        if (Error Err = parseEntireSummary())
+        if (Error Err = parseEntireSummary(Entry.ID))
           return Err;
         break;
       case bitc::MODULE_STRTAB_BLOCK_ID:
@@ -4895,7 +4958,7 @@ Error ModuleSummaryIndexBitcodeReader::parseModule() {
         case bitc::MODULE_CODE_HASH: {
           if (Record.size() != 5)
             return error("Invalid hash length " + Twine(Record.size()).str());
-          auto &Hash = addThisModulePath()->second.second;
+          auto &Hash = addThisModule()->second.second;
           int Pos = 0;
           for (auto &Val : Record) {
             assert(!(Val >> 32) && "Unexpected high bits set");
@@ -4970,8 +5033,8 @@ std::vector<FunctionSummary::EdgeTy> ModuleSummaryIndexBitcodeReader::makeCallLi
 
 // Eagerly parse the entire summary block. This populates the GlobalValueSummary
 // objects in the index.
-Error ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
-  if (Stream.EnterSubBlock(bitc::GLOBALVAL_SUMMARY_BLOCK_ID))
+Error ModuleSummaryIndexBitcodeReader::parseEntireSummary(unsigned ID) {
+  if (Stream.EnterSubBlock(ID))
     return error("Invalid record");
   SmallVector<uint64_t, 64> Record;
 
@@ -4985,9 +5048,9 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
   }
   const uint64_t Version = Record[0];
   const bool IsOldProfileFormat = Version == 1;
-  if (Version < 1 || Version > 3)
+  if (Version < 1 || Version > 4)
     return error("Invalid summary version " + Twine(Version) +
-                 ", 1, 2 or 3 expected");
+                 ", 1, 2, 3 or 4 expected");
   Record.clear();
 
   // Keep around the last seen summary to be used when we see an optional
@@ -5037,9 +5100,9 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
           std::make_pair(TheIndex.getOrInsertValueInfo(RefGUID), RefGUID);
       break;
     }
-    // FS_PERMODULE: [valueid, flags, instcount, numrefs, numrefs x valueid,
-    //                n x (valueid)]
-    // FS_PERMODULE_PROFILE: [valueid, flags, instcount, numrefs,
+    // FS_PERMODULE: [valueid, flags, instcount, fflags, numrefs,
+    //                numrefs x valueid, n x (valueid)]
+    // FS_PERMODULE_PROFILE: [valueid, flags, instcount, fflags, numrefs,
     //                        numrefs x valueid,
     //                        n x (valueid, hotness)]
     case bitc::FS_PERMODULE:
@@ -5047,14 +5110,21 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
       unsigned ValueID = Record[0];
       uint64_t RawFlags = Record[1];
       unsigned InstCount = Record[2];
+      uint64_t RawFunFlags = 0;
       unsigned NumRefs = Record[3];
+      int RefListStartIndex = 4;
+      if (Version >= 4) {
+        RawFunFlags = Record[3];
+        NumRefs = Record[4];
+        RefListStartIndex = 5;
+      }
+
       auto Flags = getDecodedGVSummaryFlags(RawFlags, Version);
       // The module path string ref set in the summary must be owned by the
       // index's module string table. Since we don't have a module path
       // string table section in the per-module index, we create a single
       // module path string table entry with an empty (0) ID to take
       // ownership.
-      static int RefListStartIndex = 4;
       int CallGraphEdgeStartIndex = RefListStartIndex + NumRefs;
       assert(Record.size() >= RefListStartIndex + NumRefs &&
              "Record size inconsistent with number of references");
@@ -5065,8 +5135,9 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
           ArrayRef<uint64_t>(Record).slice(CallGraphEdgeStartIndex),
           IsOldProfileFormat, HasProfile);
       auto FS = llvm::make_unique<FunctionSummary>(
-          Flags, InstCount, std::move(Refs), std::move(Calls),
-          std::move(PendingTypeTests), std::move(PendingTypeTestAssumeVCalls),
+          Flags, InstCount, getDecodedFFlags(RawFunFlags), std::move(Refs),
+          std::move(Calls), std::move(PendingTypeTests),
+          std::move(PendingTypeTestAssumeVCalls),
           std::move(PendingTypeCheckedLoadVCalls),
           std::move(PendingTypeTestAssumeConstVCalls),
           std::move(PendingTypeCheckedLoadConstVCalls));
@@ -5076,7 +5147,7 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
       PendingTypeTestAssumeConstVCalls.clear();
       PendingTypeCheckedLoadConstVCalls.clear();
       auto VIAndOriginalGUID = getValueInfoFromValueId(ValueID);
-      FS->setModulePath(addThisModulePath()->first());
+      FS->setModulePath(addThisModule()->first());
       FS->setOriginalName(VIAndOriginalGUID.second);
       TheIndex.addGlobalValueSummary(VIAndOriginalGUID.first, std::move(FS));
       break;
@@ -5096,7 +5167,7 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
       // string table section in the per-module index, we create a single
       // module path string table entry with an empty (0) ID to take
       // ownership.
-      AS->setModulePath(addThisModulePath()->first());
+      AS->setModulePath(addThisModule()->first());
 
       GlobalValue::GUID AliaseeGUID =
           getValueInfoFromValueId(AliaseeID).first.getGUID();
@@ -5119,15 +5190,15 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
       std::vector<ValueInfo> Refs =
           makeRefList(ArrayRef<uint64_t>(Record).slice(2));
       auto FS = llvm::make_unique<GlobalVarSummary>(Flags, std::move(Refs));
-      FS->setModulePath(addThisModulePath()->first());
+      FS->setModulePath(addThisModule()->first());
       auto GUID = getValueInfoFromValueId(ValueID);
       FS->setOriginalName(GUID.second);
       TheIndex.addGlobalValueSummary(GUID.first, std::move(FS));
       break;
     }
-    // FS_COMBINED: [valueid, modid, flags, instcount, numrefs,
+    // FS_COMBINED: [valueid, modid, flags, instcount, fflags, numrefs,
     //               numrefs x valueid, n x (valueid)]
-    // FS_COMBINED_PROFILE: [valueid, modid, flags, instcount, numrefs,
+    // FS_COMBINED_PROFILE: [valueid, modid, flags, instcount, fflags, numrefs,
     //                       numrefs x valueid, n x (valueid, hotness)]
     case bitc::FS_COMBINED:
     case bitc::FS_COMBINED_PROFILE: {
@@ -5135,9 +5206,17 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
       uint64_t ModuleId = Record[1];
       uint64_t RawFlags = Record[2];
       unsigned InstCount = Record[3];
+      uint64_t RawFunFlags = 0;
       unsigned NumRefs = Record[4];
+      int RefListStartIndex = 5;
+
+      if (Version >= 4) {
+        RawFunFlags = Record[4];
+        NumRefs = Record[5];
+        RefListStartIndex = 6;
+      }
+
       auto Flags = getDecodedGVSummaryFlags(RawFlags, Version);
-      static int RefListStartIndex = 5;
       int CallGraphEdgeStartIndex = RefListStartIndex + NumRefs;
       assert(Record.size() >= RefListStartIndex + NumRefs &&
              "Record size inconsistent with number of references");
@@ -5149,8 +5228,9 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
           IsOldProfileFormat, HasProfile);
       ValueInfo VI = getValueInfoFromValueId(ValueID).first;
       auto FS = llvm::make_unique<FunctionSummary>(
-          Flags, InstCount, std::move(Refs), std::move(Edges),
-          std::move(PendingTypeTests), std::move(PendingTypeTestAssumeVCalls),
+          Flags, InstCount, getDecodedFFlags(RawFunFlags), std::move(Refs),
+          std::move(Edges), std::move(PendingTypeTests),
+          std::move(PendingTypeTestAssumeVCalls),
           std::move(PendingTypeCheckedLoadVCalls),
           std::move(PendingTypeTestAssumeConstVCalls),
           std::move(PendingTypeCheckedLoadConstVCalls));
@@ -5247,6 +5327,20 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
           {{Record[0], Record[1]}, {Record.begin() + 2, Record.end()}});
       break;
     }
+    case bitc::FS_CFI_FUNCTION_DEFS: {
+      std::set<std::string> &CfiFunctionDefs = TheIndex.cfiFunctionDefs();
+      for (unsigned I = 0; I != Record.size(); I += 2)
+        CfiFunctionDefs.insert(
+            {Strtab.data() + Record[I], static_cast<size_t>(Record[I + 1])});
+      break;
+    }
+    case bitc::FS_CFI_FUNCTION_DECLS: {
+      std::set<std::string> &CfiFunctionDecls = TheIndex.cfiFunctionDecls();
+      for (unsigned I = 0; I != Record.size(); I += 2)
+        CfiFunctionDecls.insert(
+            {Strtab.data() + Record[I], static_cast<size_t>(Record[I + 1])});
+      break;
+    }
     }
   }
   llvm_unreachable("Exit infinite loop");
@@ -5261,7 +5355,7 @@ Error ModuleSummaryIndexBitcodeReader::parseModuleStringTable() {
   SmallVector<uint64_t, 64> Record;
 
   SmallString<128> ModulePath;
-  ModulePathStringTableTy::iterator LastSeenModulePath;
+  ModuleSummaryIndex::ModuleInfo *LastSeenModule = nullptr;
 
   while (true) {
     BitstreamEntry Entry = Stream.advanceSkippingSubblocks();
@@ -5288,8 +5382,8 @@ Error ModuleSummaryIndexBitcodeReader::parseModuleStringTable() {
       if (convertToString(Record, 1, ModulePath))
         return error("Invalid record");
 
-      LastSeenModulePath = TheIndex.addModulePath(ModulePath, ModuleId);
-      ModuleIdMap[ModuleId] = LastSeenModulePath->first();
+      LastSeenModule = TheIndex.addModule(ModulePath, ModuleId);
+      ModuleIdMap[ModuleId] = LastSeenModule->first();
 
       ModulePath.clear();
       break;
@@ -5298,15 +5392,15 @@ Error ModuleSummaryIndexBitcodeReader::parseModuleStringTable() {
     case bitc::MST_CODE_HASH: {
       if (Record.size() != 5)
         return error("Invalid hash length " + Twine(Record.size()).str());
-      if (LastSeenModulePath == TheIndex.modulePaths().end())
+      if (!LastSeenModule)
         return error("Invalid hash that does not follow a module path");
       int Pos = 0;
       for (auto &Val : Record) {
         assert(!(Val >> 32) && "Unexpected high bits set");
-        LastSeenModulePath->second.second[Pos++] = Val;
+        LastSeenModule->second.second[Pos++] = Val;
       }
-      // Reset LastSeenModulePath to avoid overriding the hash unexpectedly.
-      LastSeenModulePath = TheIndex.modulePaths().end();
+      // Reset LastSeenModule to avoid overriding the hash unexpectedly.
+      LastSeenModule = nullptr;
       break;
     }
     }
@@ -5341,8 +5435,9 @@ const std::error_category &llvm::BitcodeErrorCategory() {
   return *ErrorCategory;
 }
 
-static Expected<StringRef> readStrtab(BitstreamCursor &Stream) {
-  if (Stream.EnterSubBlock(bitc::STRTAB_BLOCK_ID))
+static Expected<StringRef> readBlobInRecord(BitstreamCursor &Stream,
+                                            unsigned Block, unsigned RecordID) {
+  if (Stream.EnterSubBlock(Block))
     return error("Invalid record");
 
   StringRef Strtab;
@@ -5363,7 +5458,7 @@ static Expected<StringRef> readStrtab(BitstreamCursor &Stream) {
     case BitstreamEntry::Record:
       StringRef Blob;
       SmallVector<uint64_t, 1> Record;
-      if (Stream.readRecord(Entry.ID, Record, &Blob) == bitc::STRTAB_BLOB)
+      if (Stream.readRecord(Entry.ID, Record, &Blob) == RecordID)
         Strtab = Blob;
       break;
     }
@@ -5376,12 +5471,20 @@ static Expected<StringRef> readStrtab(BitstreamCursor &Stream) {
 
 Expected<std::vector<BitcodeModule>>
 llvm::getBitcodeModuleList(MemoryBufferRef Buffer) {
+  auto FOrErr = getBitcodeFileContents(Buffer);
+  if (!FOrErr)
+    return FOrErr.takeError();
+  return std::move(FOrErr->Mods);
+}
+
+Expected<BitcodeFileContents>
+llvm::getBitcodeFileContents(MemoryBufferRef Buffer) {
   Expected<BitstreamCursor> StreamOrErr = initStream(Buffer);
   if (!StreamOrErr)
     return StreamOrErr.takeError();
   BitstreamCursor &Stream = *StreamOrErr;
 
-  std::vector<BitcodeModule> Modules;
+  BitcodeFileContents F;
   while (true) {
     uint64_t BCBegin = Stream.getCurrentByteNo();
 
@@ -5389,7 +5492,7 @@ llvm::getBitcodeModuleList(MemoryBufferRef Buffer) {
     // of the bitcode stream (e.g. Apple's ar tool). If we are close enough to
     // the end that there cannot possibly be another module, stop looking.
     if (BCBegin + 8 >= Stream.getBitcodeBytes().size())
-      return Modules;
+      return F;
 
     BitstreamEntry Entry = Stream.advance();
     switch (Entry.Kind) {
@@ -5415,26 +5518,49 @@ llvm::getBitcodeModuleList(MemoryBufferRef Buffer) {
         if (Stream.SkipBlock())
           return error("Malformed block");
 
-        Modules.push_back({Stream.getBitcodeBytes().slice(
-                               BCBegin, Stream.getCurrentByteNo() - BCBegin),
-                           Buffer.getBufferIdentifier(), IdentificationBit,
-                           ModuleBit});
+        F.Mods.push_back({Stream.getBitcodeBytes().slice(
+                              BCBegin, Stream.getCurrentByteNo() - BCBegin),
+                          Buffer.getBufferIdentifier(), IdentificationBit,
+                          ModuleBit});
         continue;
       }
 
       if (Entry.ID == bitc::STRTAB_BLOCK_ID) {
-        Expected<StringRef> Strtab = readStrtab(Stream);
+        Expected<StringRef> Strtab =
+            readBlobInRecord(Stream, bitc::STRTAB_BLOCK_ID, bitc::STRTAB_BLOB);
         if (!Strtab)
           return Strtab.takeError();
         // This string table is used by every preceding bitcode module that does
         // not have its own string table. A bitcode file may have multiple
         // string tables if it was created by binary concatenation, for example
         // with "llvm-cat -b".
-        for (auto I = Modules.rbegin(), E = Modules.rend(); I != E; ++I) {
+        for (auto I = F.Mods.rbegin(), E = F.Mods.rend(); I != E; ++I) {
           if (!I->Strtab.empty())
             break;
           I->Strtab = *Strtab;
         }
+        // Similarly, the string table is used by every preceding symbol table;
+        // normally there will be just one unless the bitcode file was created
+        // by binary concatenation.
+        if (!F.Symtab.empty() && F.StrtabForSymtab.empty())
+          F.StrtabForSymtab = *Strtab;
+        continue;
+      }
+
+      if (Entry.ID == bitc::SYMTAB_BLOCK_ID) {
+        Expected<StringRef> SymtabOrErr =
+            readBlobInRecord(Stream, bitc::SYMTAB_BLOCK_ID, bitc::SYMTAB_BLOB);
+        if (!SymtabOrErr)
+          return SymtabOrErr.takeError();
+
+        // We can expect the bitcode file to have multiple symbol tables if it
+        // was created by binary concatenation. In that case we silently
+        // ignore any subsequent symbol tables, which is fine because this is a
+        // low level function. The client is expected to notice that the number
+        // of modules in the symbol table does not match the number of modules
+        // in the input file and regenerate the symbol table.
+        if (F.Symtab.empty())
+          F.Symtab = *SymtabOrErr;
         continue;
       }
 
@@ -5505,13 +5631,16 @@ BitcodeModule::getLazyModule(LLVMContext &Context, bool ShouldLazyLoadMetadata,
 }
 
 // Parse the specified bitcode buffer and merge the index into CombinedIndex.
+// We don't use ModuleIdentifier here because the client may need to control the
+// module path used in the combined summary (e.g. when reading summaries for
+// regular LTO modules).
 Error BitcodeModule::readSummary(ModuleSummaryIndex &CombinedIndex,
-                                 unsigned ModuleId) {
+                                 StringRef ModulePath, uint64_t ModuleId) {
   BitstreamCursor Stream(Buffer);
   Stream.JumpToBit(ModuleBit);
 
   ModuleSummaryIndexBitcodeReader R(std::move(Stream), Strtab, CombinedIndex,
-                                    ModuleIdentifier, ModuleId);
+                                    ModulePath, ModuleId);
   return R.parseModule();
 }
 
@@ -5531,7 +5660,7 @@ Expected<std::unique_ptr<ModuleSummaryIndex>> BitcodeModule::getSummary() {
 }
 
 // Check if the given bitcode buffer contains a global value summary block.
-Expected<bool> BitcodeModule::hasSummary() {
+Expected<BitcodeLTOInfo> BitcodeModule::getLTOInfo() {
   BitstreamCursor Stream(Buffer);
   Stream.JumpToBit(ModuleBit);
 
@@ -5545,11 +5674,14 @@ Expected<bool> BitcodeModule::hasSummary() {
     case BitstreamEntry::Error:
       return error("Malformed block");
     case BitstreamEntry::EndBlock:
-      return false;
+      return BitcodeLTOInfo{/*IsThinLTO=*/false, /*HasSummary=*/false};
 
     case BitstreamEntry::SubBlock:
       if (Entry.ID == bitc::GLOBALVAL_SUMMARY_BLOCK_ID)
-        return true;
+        return BitcodeLTOInfo{/*IsThinLTO=*/true, /*HasSummary=*/true};
+
+      if (Entry.ID == bitc::FULL_LTO_GLOBALVAL_SUMMARY_BLOCK_ID)
+        return BitcodeLTOInfo{/*IsThinLTO=*/false, /*HasSummary=*/true};
 
       // Ignore other sub-blocks.
       if (Stream.SkipBlock())
@@ -5636,12 +5768,12 @@ Expected<std::string> llvm::getBitcodeProducerString(MemoryBufferRef Buffer) {
 
 Error llvm::readModuleSummaryIndex(MemoryBufferRef Buffer,
                                    ModuleSummaryIndex &CombinedIndex,
-                                   unsigned ModuleId) {
+                                   uint64_t ModuleId) {
   Expected<BitcodeModule> BM = getSingleModule(Buffer);
   if (!BM)
     return BM.takeError();
 
-  return BM->readSummary(CombinedIndex, ModuleId);
+  return BM->readSummary(CombinedIndex, BM->getModuleIdentifier(), ModuleId);
 }
 
 Expected<std::unique_ptr<ModuleSummaryIndex>>
@@ -5653,12 +5785,12 @@ llvm::getModuleSummaryIndex(MemoryBufferRef Buffer) {
   return BM->getSummary();
 }
 
-Expected<bool> llvm::hasGlobalValueSummary(MemoryBufferRef Buffer) {
+Expected<BitcodeLTOInfo> llvm::getBitcodeLTOInfo(MemoryBufferRef Buffer) {
   Expected<BitcodeModule> BM = getSingleModule(Buffer);
   if (!BM)
     return BM.takeError();
 
-  return BM->hasSummary();
+  return BM->getLTOInfo();
 }
 
 Expected<std::unique_ptr<ModuleSummaryIndex>>

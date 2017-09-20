@@ -19,12 +19,12 @@
 #include "llvm/ADT/ilist_node.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/ADT/simple_ilist.h"
-#include "llvm/CodeGen/MachineInstrBundleIterator.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/MachineInstrBundleIterator.h"
 #include "llvm/IR/DebugLoc.h"
-#include "llvm/Support/BranchProbability.h"
 #include "llvm/MC/LaneBitmask.h"
 #include "llvm/MC/MCRegisterInfo.h"
+#include "llvm/Support/BranchProbability.h"
 #include <cassert>
 #include <cstdint>
 #include <functional>
@@ -375,6 +375,9 @@ public:
 
   /// Indicates if this is the entry block of a cleanup funclet.
   void setIsCleanupFuncletEntry(bool V = true) { IsCleanupFuncletEntry = V; }
+
+  /// Returns true if it is legal to hoist instructions into this block.
+  bool isLegalToHoistInto() const;
 
   // Code Layout methods.
 
@@ -745,7 +748,7 @@ private:
 
   // Machine-CFG mutators
 
-  /// Remove Pred as a predecessor of this MachineBasicBlock. Don't do this
+  /// Add Pred as a predecessor of this MachineBasicBlock. Don't do this
   /// unless you know what you're doing, because it doesn't update Pred's
   /// successors list. Use Pred->addSuccessor instead.
   void addPredecessor(MachineBasicBlock *Pred);

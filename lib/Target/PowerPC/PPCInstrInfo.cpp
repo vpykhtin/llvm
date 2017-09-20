@@ -292,6 +292,29 @@ unsigned PPCInstrInfo::isLoadFromStackSlot(const MachineInstr &MI,
   return 0;
 }
 
+// For opcodes with the ReMaterializable flag set, this function is called to
+// verify the instruction is really rematable.  
+bool PPCInstrInfo::isReallyTriviallyReMaterializable(const MachineInstr &MI,
+                                                     AliasAnalysis *AA) const {
+  switch (MI.getOpcode()) {
+  default: 
+    // This function should only be called for opcodes with the ReMaterializable
+    // flag set.
+    llvm_unreachable("Unknown rematerializable operation!");
+    break;
+  case PPC::LI:
+  case PPC::LI8:
+  case PPC::LIS:
+  case PPC::LIS8:
+  case PPC::QVGPCI:
+  case PPC::ADDIStocHA:
+  case PPC::ADDItocL:
+  case PPC::LOAD_STACK_GUARD:
+    return true;
+  }
+  return false;
+}
+
 unsigned PPCInstrInfo::isStoreToStackSlot(const MachineInstr &MI,
                                           int &FrameIndex) const {
   // Note: This list must be kept consistent with StoreRegToStackSlot.
@@ -1612,12 +1635,15 @@ bool PPCInstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, unsigned SrcReg,
   if (equalityOnly) {
     // We need to check the uses of the condition register in order to reject
     // non-equality comparisons.
-    for (MachineRegisterInfo::use_instr_iterator I =MRI->use_instr_begin(CRReg),
-         IE = MRI->use_instr_end(); I != IE; ++I) {
+    for (MachineRegisterInfo::use_instr_iterator
+         I = MRI->use_instr_begin(CRReg), IE = MRI->use_instr_end();
+         I != IE; ++I) {
       MachineInstr *UseMI = &*I;
       if (UseMI->getOpcode() == PPC::BCC) {
-        unsigned Pred = UseMI->getOperand(0).getImm();
-        if (Pred != PPC::PRED_EQ && Pred != PPC::PRED_NE)
+        PPC::Predicate Pred = (PPC::Predicate)UseMI->getOperand(0).getImm();
+        unsigned PredCond = PPC::getPredicateCondition(Pred);
+        // We ignore hint bits when checking for non-equality comparisons.
+        if (PredCond != PPC::PRED_EQ && PredCond != PPC::PRED_NE)
           return false;
       } else if (UseMI->getOpcode() == PPC::ISEL ||
                  UseMI->getOpcode() == PPC::ISEL8) {
@@ -1635,8 +1661,9 @@ bool PPCInstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, unsigned SrcReg,
   for (MachineBasicBlock::iterator EL = CmpInstr.getParent()->end(); I != EL;
        ++I) {
     bool FoundUse = false;
-    for (MachineRegisterInfo::use_instr_iterator J =MRI->use_instr_begin(CRReg),
-         JE = MRI->use_instr_end(); J != JE; ++J)
+    for (MachineRegisterInfo::use_instr_iterator
+         J = MRI->use_instr_begin(CRReg), JE = MRI->use_instr_end();
+         J != JE; ++J)
       if (&*J == &*I) {
         FoundUse = true;
         break;
@@ -1670,19 +1697,23 @@ bool PPCInstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, unsigned SrcReg,
       MachineInstr *UseMI = &*MRI->use_instr_begin(CRReg);
       if (UseMI->getOpcode() == PPC::BCC) {
         PPC::Predicate Pred = (PPC::Predicate)UseMI->getOperand(0).getImm();
+        unsigned PredCond = PPC::getPredicateCondition(Pred);
+        unsigned PredHint = PPC::getPredicateHint(Pred);
         int16_t Immed = (int16_t)Value;
 
-        if (Immed == -1 && Pred == PPC::PRED_GT) {
+        // When modyfing the condition in the predicate, we propagate hint bits
+        // from the original predicate to the new one.
+        if (Immed == -1 && PredCond == PPC::PRED_GT) {
           // We convert "greater than -1" into "greater than or equal to 0",
           // since we are assuming signed comparison by !equalityOnly
           PredsToUpdate.push_back(std::make_pair(&(UseMI->getOperand(0)),
-                                  PPC::PRED_GE));
+                                  PPC::getPredicate(PPC::PRED_GE, PredHint)));
           Success = true;
         }
-        else if (Immed == 1 && Pred == PPC::PRED_LT) {
+        else if (Immed == 1 && PredCond == PPC::PRED_LT) {
           // We convert "less than 1" into "less than or equal to 0".
           PredsToUpdate.push_back(std::make_pair(&(UseMI->getOperand(0)),
-                                  PPC::PRED_LE));
+                                  PPC::getPredicate(PPC::PRED_LE, PredHint)));
           Success = true;
         }
       }
@@ -1779,9 +1810,11 @@ bool PPCInstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, unsigned SrcReg,
       MachineInstr *UseMI = &*I;
       if (UseMI->getOpcode() == PPC::BCC) {
         PPC::Predicate Pred = (PPC::Predicate) UseMI->getOperand(0).getImm();
+        unsigned PredCond = PPC::getPredicateCondition(Pred);
         assert((!equalityOnly ||
-                Pred == PPC::PRED_EQ || Pred == PPC::PRED_NE) &&
+                PredCond == PPC::PRED_EQ || PredCond == PPC::PRED_NE) &&
                "Invalid predicate for equality-only optimization");
+        (void)PredCond; // To suppress warning in release build.
         PredsToUpdate.push_back(std::make_pair(&(UseMI->getOperand(0)),
                                 PPC::getSwappedPredicate(Pred)));
       } else if (UseMI->getOpcode() == PPC::ISEL ||
@@ -1964,7 +1997,7 @@ bool PPCInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
   }
   case PPC::CFENCE8: {
     auto Val = MI.getOperand(0).getReg();
-    BuildMI(MBB, MI, DL, get(PPC::CMPW), PPC::CR7).addReg(Val).addReg(Val);
+    BuildMI(MBB, MI, DL, get(PPC::CMPD), PPC::CR7).addReg(Val).addReg(Val);
     BuildMI(MBB, MI, DL, get(PPC::CTRL_DEP))
         .addImm(PPC::PRED_NE_MINUS)
         .addReg(PPC::CR7)

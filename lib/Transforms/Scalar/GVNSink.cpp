@@ -64,6 +64,17 @@ using namespace llvm;
 
 STATISTIC(NumRemoved, "Number of instructions removed");
 
+namespace llvm {
+namespace GVNExpression {
+
+LLVM_DUMP_METHOD void Expression::dump() const {
+  print(dbgs());
+  dbgs() << "\n";
+}
+
+}
+}
+
 namespace {
 
 static bool isMemoryInst(const Instruction *I) {
@@ -169,8 +180,8 @@ struct SinkingInstructionCandidate {
             NumExtraPHIs) // PHIs are expensive, so make sure they're worth it.
            - SplitEdgeCost;
   }
-  bool operator>=(const SinkingInstructionCandidate &Other) const {
-    return Cost >= Other.Cost;
+  bool operator>(const SinkingInstructionCandidate &Other) const {
+    return Cost > Other.Cost;
   }
 };
 
@@ -218,12 +229,14 @@ public:
   ModelledPHI(const VArray &V, const BArray &B) {
     std::copy(V.begin(), V.end(), std::back_inserter(Values));
     std::copy(B.begin(), B.end(), std::back_inserter(Blocks));
+    std::sort(Blocks.begin(), Blocks.end());
   }
 
   /// Create a PHI from [I[OpNum] for I in Insts].
   template <typename BArray>
   ModelledPHI(ArrayRef<Instruction *> Insts, unsigned OpNum, const BArray &B) {
     std::copy(B.begin(), B.end(), std::back_inserter(Blocks));
+    std::sort(Blocks.begin(), Blocks.end());
     for (auto *I : Insts)
       Values.push_back(I->getOperand(OpNum));
   }
@@ -745,7 +758,7 @@ unsigned GVNSink::sinkBB(BasicBlock *BBEnd) {
   std::stable_sort(
       Candidates.begin(), Candidates.end(),
       [](const SinkingInstructionCandidate &A,
-         const SinkingInstructionCandidate &B) { return A >= B; });
+         const SinkingInstructionCandidate &B) { return A > B; });
   DEBUG(dbgs() << " -- Sinking candidates:\n"; for (auto &C
                                                     : Candidates) dbgs()
                                                << "  " << C << "\n";);

@@ -50,8 +50,8 @@ define void @TestUnionLD1(fp128 %s, i64 %n) #0 {
 ; CHECK-NEXT:    andq %rdi, %rcx
 ; CHECK-NEXT:    movabsq $-281474976710656, %rdx # imm = 0xFFFF000000000000
 ; CHECK-NEXT:    andq -{{[0-9]+}}(%rsp), %rdx
-; CHECK-NEXT:    orq %rcx, %rdx
 ; CHECK-NEXT:    movq %rax, -{{[0-9]+}}(%rsp)
+; CHECK-NEXT:    orq %rcx, %rdx
 ; CHECK-NEXT:    movq %rdx, -{{[0-9]+}}(%rsp)
 ; CHECK-NEXT:    movaps -{{[0-9]+}}(%rsp), %xmm0
 ; CHECK-NEXT:    jmp foo # TAILCALL
@@ -227,7 +227,7 @@ define fp128 @TestI128_4(fp128 %x) #0 {
 ; CHECK:       # BB#0: # %entry
 ; CHECK-NEXT:    subq $40, %rsp
 ; CHECK-NEXT:    movaps %xmm0, %xmm1
-; CHECK-NEXT:    movaps %xmm1, {{[0-9]+}}(%rsp)
+; CHECK-NEXT:    movaps %xmm0, {{[0-9]+}}(%rsp)
 ; CHECK-NEXT:    movq {{[0-9]+}}(%rsp), %rax
 ; CHECK-NEXT:    movq %rax, {{[0-9]+}}(%rsp)
 ; CHECK-NEXT:    movq $0, (%rsp)
@@ -275,7 +275,7 @@ define fp128 @acosl(fp128 %x) #0 {
 ; CHECK:       # BB#0: # %entry
 ; CHECK-NEXT:    subq $40, %rsp
 ; CHECK-NEXT:    movaps %xmm0, %xmm1
-; CHECK-NEXT:    movaps %xmm1, {{[0-9]+}}(%rsp)
+; CHECK-NEXT:    movaps %xmm0, {{[0-9]+}}(%rsp)
 ; CHECK-NEXT:    movq {{[0-9]+}}(%rsp), %rax
 ; CHECK-NEXT:    movq %rax, {{[0-9]+}}(%rsp)
 ; CHECK-NEXT:    movq $0, (%rsp)

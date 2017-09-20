@@ -13,7 +13,7 @@
 
 ; GCN-LABEL: {{^}}main:
 
-; GCN-DAG: s_mov_b32 s[[OFFREG:[0-9]+]], s12
+; GCN-NOT: s_mov_b32 s12
 ; GCN-DAG: s_mov_b32 s[[DESC0:[0-9]+]], SCRATCH_RSRC_DWORD0
 ; GCN-DAG: s_mov_b32 s{{[0-9]+}}, SCRATCH_RSRC_DWORD1
 ; GCN-DAG: s_mov_b32 s{{[0-9]+}}, -1
@@ -22,8 +22,8 @@
 ; GFX9-DAG: s_mov_b32 s[[DESC3:[0-9]+]], 0xe00000
 
 ; OFFREG is offset system SGPR
-; GCN: buffer_store_dword {{v[0-9]+}}, off, s{{\[}}[[DESC0]]:[[DESC3]]], s[[OFFREG]] offset:{{[0-9]+}} ; 4-byte Folded Spill
-; GCN: buffer_load_dword v{{[0-9]+}}, off, s{{\[}}[[DESC0]]:[[DESC3]]], s[[OFFREG]] offset:{{[0-9]+}} ; 4-byte Folded Reload
+; GCN: buffer_store_dword {{v[0-9]+}}, off, s{{\[}}[[DESC0]]:[[DESC3]]], s12 offset:{{[0-9]+}} ; 4-byte Folded Spill
+; GCN: buffer_load_dword v{{[0-9]+}}, off, s{{\[}}[[DESC0]]:[[DESC3]]], s12 offset:{{[0-9]+}} ; 4-byte Folded Reload
 ; GCN: NumVgprs: 256
 ; GCN: ScratchSize: 1536
 
@@ -37,7 +37,7 @@ bb:
   %tmp15 = getelementptr [16 x <16 x i8>], [16 x <16 x i8>] addrspace(4)* %arg4, i64 0, i64 0
   %tmp16 = load <16 x i8>, <16 x i8> addrspace(4)* %tmp15, align 16, !tbaa !0
   %tmp17 = add i32 %arg5, %arg7
-  %tmp16.cast = bitcast <16 x i8> %tmp16 to <4 x i32>
+  %tmp16.cast = bitcast <4 x i32> %tmp16 to <4 x i32>
   %tmp18 = call <4 x float> @llvm.amdgcn.buffer.load.format.v4f32(<4 x i32> %tmp16.cast, i32 %tmp17, i32 0, i1 false, i1 false)
   %tmp19 = extractelement <4 x float> %tmp18, i32 0
   %tmp20 = extractelement <4 x float> %tmp18, i32 1
@@ -488,7 +488,7 @@ bb157:                                            ; preds = %bb24
 declare i32 @llvm.amdgcn.mbcnt.lo(i32, i32) #1
 declare void @llvm.amdgcn.exp.f32(i32, i32, float, float, float, float, i1, i1) #0
 
-declare float @llvm.SI.load.const(<16 x i8>, i32) #1
+declare float @llvm.SI.load.const.v4i32(<4 x i32>, i32) #1
 declare <4 x float> @llvm.amdgcn.buffer.load.format.v4f32(<4 x i32>, i32, i32, i1, i1) #2
 
 attributes #0 = { nounwind }
