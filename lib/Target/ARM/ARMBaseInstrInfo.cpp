@@ -1550,20 +1550,29 @@ void ARMBaseInstrInfo::reMaterialize(MachineBasicBlock &MBB,
   }
 }
 
-MachineInstr *ARMBaseInstrInfo::duplicate(MachineInstr &Orig,
-                                          MachineFunction &MF) const {
-  MachineInstr *MI = TargetInstrInfo::duplicate(Orig, MF);
-  switch (Orig.getOpcode()) {
-  case ARM::tLDRpci_pic:
-  case ARM::t2LDRpci_pic: {
-    unsigned CPI = Orig.getOperand(1).getIndex();
-    unsigned PCLabelId = duplicateCPV(MF, CPI);
-    Orig.getOperand(1).setIndex(CPI);
-    Orig.getOperand(2).setImm(PCLabelId);
-    break;
+MachineInstr &
+ARMBaseInstrInfo::duplicate(MachineBasicBlock &MBB,
+    MachineBasicBlock::iterator InsertBefore,
+    const MachineInstr &Orig) const {
+  MachineInstr &Cloned = TargetInstrInfo::duplicate(MBB, InsertBefore, Orig);
+  MachineBasicBlock::instr_iterator I = Cloned.getIterator();
+  for (;;) {
+    switch (I->getOpcode()) {
+    case ARM::tLDRpci_pic:
+    case ARM::t2LDRpci_pic: {
+      MachineFunction &MF = *MBB.getParent();
+      unsigned CPI = I->getOperand(1).getIndex();
+      unsigned PCLabelId = duplicateCPV(MF, CPI);
+      I->getOperand(1).setIndex(CPI);
+      I->getOperand(2).setImm(PCLabelId);
+      break;
+    }
+    }
+    if (!I->isBundledWithSucc())
+      break;
+    ++I;
   }
-  }
-  return MI;
+  return Cloned;
 }
 
 bool ARMBaseInstrInfo::produceSameValue(const MachineInstr &MI0,
@@ -1880,6 +1889,9 @@ isProfitableToIfCvt(MachineBasicBlock &TBB,
       // Diamond: TBB is the block that is branched to, FBB is the fallthrough
       TUnpredCycles = TCycles + TakenBranchCost;
       FUnpredCycles = FCycles + NotTakenBranchCost;
+      // The branch at the end of FBB will disappear when it's predicated, so
+      // discount it from PredCost.
+      PredCost -= 1 * ScalingUpFactor;
     }
     // The total cost is the cost of each path scaled by their probabilites
     unsigned TUnpredCost = Probability.scale(TUnpredCycles * ScalingUpFactor);

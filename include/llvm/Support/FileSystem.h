@@ -685,12 +685,6 @@ std::error_code createTemporaryFile(const Twine &Prefix, StringRef Suffix,
 std::error_code createUniqueDirectory(const Twine &Prefix,
                                       SmallVectorImpl<char> &ResultPath);
 
-/// @brief Fetch a path to an open file, as specified by a file descriptor
-///
-/// @param FD File descriptor to a currently open file
-/// @param ResultPath The buffer into which to write the path
-std::error_code getPathFromOpenFD(int FD, SmallVectorImpl<char> &ResultPath);
-
 enum OpenFlags : unsigned {
   F_None = 0,
 
@@ -751,7 +745,7 @@ public:
 
 private:
   /// Platform-specific mapping state.
-  uint64_t Size;
+  size_t Size;
   void *Mapping;
 
   std::error_code init(int FD, uint64_t Offset, mapmode Mode);
@@ -764,12 +758,12 @@ public:
   /// \param fd An open file descriptor to map. mapped_file_region takes
   ///   ownership if closefd is true. It must have been opended in the correct
   ///   mode.
-  mapped_file_region(int fd, mapmode mode, uint64_t length, uint64_t offset,
+  mapped_file_region(int fd, mapmode mode, size_t length, uint64_t offset,
                      std::error_code &ec);
 
   ~mapped_file_region();
 
-  uint64_t size() const;
+  size_t size() const;
   char *data() const;
 
   /// Get a const view of the data. Modifying this memory has undefined

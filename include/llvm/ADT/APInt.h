@@ -401,7 +401,11 @@ public:
   /// \brief Determine if this is a value of 1.
   ///
   /// This checks to see if the value of this APInt is one.
-  bool isOneValue() const { return getActiveBits() == 1; }
+  bool isOneValue() const {
+    if (isSingleWord())
+      return U.VAL == 1;
+    return countLeadingZerosSlowCase() == BitWidth - 1;
+  }
 
   /// \brief Determine if this is the largest unsigned value.
   ///
@@ -1720,13 +1724,13 @@ public:
   /// @{
 
   /// \returns the floor log base 2 of this APInt.
-  unsigned logBase2() const { return BitWidth - 1 - countLeadingZeros(); }
+  unsigned logBase2() const { return getActiveBits() -  1; }
 
   /// \returns the ceil log base 2 of this APInt.
   unsigned ceilLogBase2() const {
     APInt temp(*this);
     --temp;
-    return BitWidth - temp.countLeadingZeros();
+    return temp.getActiveBits();
   }
 
   /// \returns the nearest log base 2 of this APInt. Ties round up.

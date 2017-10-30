@@ -11,6 +11,9 @@ def isCI : Predicate<"Subtarget->getGeneration() "
 def isCIOnly : Predicate<"Subtarget->getGeneration() =="
                          "SISubtarget::SEA_ISLANDS">,
   AssemblerPredicate <"FeatureSeaIslands">;
+def isVIOnly : Predicate<"Subtarget->getGeneration() =="
+                         "SISubtarget::VOLCANIC_ISLANDS">,
+  AssemblerPredicate <"FeatureVolcanicIslands">;
 
 def DisableInst : Predicate <"false">, AssemblerPredicate<"FeatureDisable">;
 
@@ -22,6 +25,7 @@ def SIEncodingFamily {
   int VI = 1;
   int SDWA = 2;
   int SDWA9 = 3;
+  int GFX9 = 4;
 }
 
 //===----------------------------------------------------------------------===//
@@ -111,79 +115,108 @@ defm atomic_inc_global : global_binary_atomic_op<SIatomic_inc>;
 defm atomic_dec_global : global_binary_atomic_op<SIatomic_dec>;
 
 //===----------------------------------------------------------------------===//
-// SDNodes and PatFrag for local loads and stores to enable s_mov_b32 m0, -1
-// to be glued to the memory instructions.
+// SDNodes PatFrags for loads/stores with a glue input.
+// This is for SDNodes and PatFrag for local loads and stores to
+// enable s_mov_b32 m0, -1 to be glued to the memory instructions.
+//
+// These mirror the regular load/store PatFrags and rely on special
+// processing during Select() to add the glued copy.
+//
 //===----------------------------------------------------------------------===//
 
-def SIld_local : SDNode <"ISD::LOAD", SDTLoad,
+def AMDGPUld_glue : SDNode <"ISD::LOAD", SDTLoad,
   [SDNPHasChain, SDNPMayLoad, SDNPMemOperand, SDNPInGlue]
 >;
 
-def si_ld_local : PatFrag <(ops node:$ptr), (SIld_local node:$ptr), [{
-  return cast<LoadSDNode>(N)->getAddressSpace() == AMDGPUASI.LOCAL_ADDRESS;
+def unindexedload_glue : PatFrag <(ops node:$ptr), (AMDGPUld_glue node:$ptr), [{
+  return cast<LoadSDNode>(N)->getAddressingMode() == ISD::UNINDEXED;
 }]>;
 
-def si_load_local : PatFrag <(ops node:$ptr), (si_ld_local node:$ptr), [{
-  return cast<LoadSDNode>(N)->getAddressingMode() == ISD::UNINDEXED &&
-         cast<LoadSDNode>(N)->getExtensionType() == ISD::NON_EXTLOAD;
+def load_glue : PatFrag <(ops node:$ptr), (unindexedload_glue node:$ptr), [{
+  return cast<LoadSDNode>(N)->getExtensionType() == ISD::NON_EXTLOAD;
 }]>;
 
-def si_load_local_align8 : Aligned8Bytes <
-  (ops node:$ptr), (si_load_local node:$ptr)
->;
+def extload_glue : PatFrag<(ops node:$ptr), (load_glue node:$ptr), [{
+  return cast<LoadSDNode>(N)->getExtensionType() == ISD::EXTLOAD;
+}]>;
 
-def si_sextload_local : PatFrag <(ops node:$ptr), (si_ld_local node:$ptr), [{
+def sextload_glue : PatFrag<(ops node:$ptr), (unindexedload_glue node:$ptr), [{
   return cast<LoadSDNode>(N)->getExtensionType() == ISD::SEXTLOAD;
 }]>;
-def si_az_extload_local : AZExtLoadBase <si_ld_local>;
 
-multiclass SIExtLoadLocal <PatFrag ld_node> {
+def zextload_glue : PatFrag<(ops node:$ptr), (unindexedload_glue node:$ptr), [{
+  return cast<LoadSDNode>(N)->getExtensionType() == ISD::ZEXTLOAD;
+}]>;
 
-  def _i8 : PatFrag <(ops node:$ptr), (ld_node node:$ptr),
-                     [{return cast<LoadSDNode>(N)->getMemoryVT() == MVT::i8;}]
-  >;
+def az_extload_glue : AZExtLoadBase <unindexedload_glue>;
 
-  def _i16 : PatFrag <(ops node:$ptr), (ld_node node:$ptr),
-                     [{return cast<LoadSDNode>(N)->getMemoryVT() == MVT::i16;}]
-  >;
-}
+def az_extloadi8_glue : PatFrag<(ops node:$ptr), (az_extload_glue node:$ptr), [{
+  return cast<LoadSDNode>(N)->getMemoryVT() == MVT::i8;
+}]>;
 
-defm si_sextload_local : SIExtLoadLocal <si_sextload_local>;
-defm si_az_extload_local : SIExtLoadLocal <si_az_extload_local>;
+def az_extloadi16_glue : PatFrag<(ops node:$ptr), (az_extload_glue node:$ptr), [{
+  return cast<LoadSDNode>(N)->getMemoryVT() == MVT::i16;
+}]>;
 
-def SIst_local : SDNode <"ISD::STORE", SDTStore,
+def sextloadi8_glue : PatFrag<(ops node:$ptr), (sextload_glue node:$ptr), [{
+  return cast<LoadSDNode>(N)->getMemoryVT() == MVT::i8;
+}]>;
+
+def sextloadi16_glue : PatFrag<(ops node:$ptr), (sextload_glue node:$ptr), [{
+  return cast<LoadSDNode>(N)->getMemoryVT() == MVT::i16;
+}]>;
+
+def load_glue_align8 : Aligned8Bytes <
+  (ops node:$ptr), (load_glue node:$ptr)
+>;
+
+
+def load_local_m0 : LoadFrag<load_glue>, LocalAddress;
+def sextloadi8_local_m0 : LoadFrag<sextloadi8_glue>, LocalAddress;
+def sextloadi16_local_m0 : LoadFrag<sextloadi16_glue>, LocalAddress;
+def az_extloadi8_local_m0 : LoadFrag<az_extloadi8_glue>, LocalAddress;
+def az_extloadi16_local_m0 : LoadFrag<az_extloadi16_glue>, LocalAddress;
+def load_align8_local_m0 : LoadFrag <load_glue_align8>, LocalAddress;
+
+
+def AMDGPUst_glue : SDNode <"ISD::STORE", SDTStore,
   [SDNPHasChain, SDNPMayStore, SDNPMemOperand, SDNPInGlue]
 >;
 
-def si_st_local : PatFrag <
-  (ops node:$val, node:$ptr), (SIst_local node:$val, node:$ptr), [{
-  return cast<StoreSDNode>(N)->getAddressSpace() == AMDGPUASI.LOCAL_ADDRESS;
+def unindexedstore_glue : PatFrag<(ops node:$val, node:$ptr),
+                                   (AMDGPUst_glue node:$val, node:$ptr), [{
+  return cast<StoreSDNode>(N)->getAddressingMode() == ISD::UNINDEXED;
 }]>;
 
-def si_store_local : PatFrag <
-  (ops node:$val, node:$ptr), (si_st_local node:$val, node:$ptr), [{
-  return cast<StoreSDNode>(N)->getAddressingMode() == ISD::UNINDEXED &&
-         !cast<StoreSDNode>(N)->isTruncatingStore();
+def store_glue : PatFrag<(ops node:$val, node:$ptr),
+                      (unindexedstore_glue node:$val, node:$ptr), [{
+  return !cast<StoreSDNode>(N)->isTruncatingStore();
 }]>;
 
-def si_store_local_align8 : Aligned8Bytes <
-  (ops node:$val, node:$ptr), (si_store_local node:$val, node:$ptr)
->;
-
-def si_truncstore_local : PatFrag <
-  (ops node:$val, node:$ptr), (si_st_local node:$val, node:$ptr), [{
+def truncstore_glue : PatFrag<(ops node:$val, node:$ptr),
+  (unindexedstore_glue node:$val, node:$ptr), [{
   return cast<StoreSDNode>(N)->isTruncatingStore();
 }]>;
 
-def si_truncstore_local_i8 : PatFrag <
-  (ops node:$val, node:$ptr), (si_truncstore_local node:$val, node:$ptr), [{
+def truncstorei8_glue : PatFrag<(ops node:$val, node:$ptr),
+                           (truncstore_glue node:$val, node:$ptr), [{
   return cast<StoreSDNode>(N)->getMemoryVT() == MVT::i8;
 }]>;
 
-def si_truncstore_local_i16 : PatFrag <
-  (ops node:$val, node:$ptr), (si_truncstore_local node:$val, node:$ptr), [{
+def truncstorei16_glue : PatFrag<(ops node:$val, node:$ptr),
+                           (truncstore_glue node:$val, node:$ptr), [{
   return cast<StoreSDNode>(N)->getMemoryVT() == MVT::i16;
 }]>;
+
+def store_glue_align8 : Aligned8Bytes <
+  (ops node:$value, node:$ptr), (store_glue node:$value, node:$ptr)
+>;
+
+def store_local_m0 : StoreFrag<store_glue>, LocalAddress;
+def truncstorei8_local_m0 : StoreFrag<truncstorei8_glue>, LocalAddress;
+def truncstorei16_local_m0 : StoreFrag<truncstorei16_glue>, LocalAddress;
+
+def store_align8_local_m0 : StoreFrag<store_glue_align8>, LocalAddress;
 
 def si_setcc_uniform : PatFrag <
   (ops node:$lhs, node:$rhs, node:$cond),
@@ -556,6 +589,7 @@ def gds : NamedOperandBit<"GDS", NamedMatchClass<"GDS">>;
 
 def omod : NamedOperandU32<"OModSI", NamedMatchClass<"OModSI">>;
 def clampmod : NamedOperandBit<"ClampSI", NamedMatchClass<"ClampSI">>;
+def highmod : NamedOperandBit<"High", NamedMatchClass<"High">>;
 
 def GLC : NamedOperandBit<"GLC", NamedMatchClass<"GLC">>;
 def slc : NamedOperandBit<"SLC", NamedMatchClass<"SLC">>;
@@ -659,6 +693,15 @@ class IntInputMods <IntInputModsMatchClass matchClass> : InputMods <matchClass> 
 def Int32InputMods : IntInputMods<Int32InputModsMatchClass>;
 def Int64InputMods : IntInputMods<Int64InputModsMatchClass>;
 
+class OpSelModsMatchClass : AsmOperandClass {
+  let Name = "OpSelMods";
+  let ParserMethod = "parseRegOrImm";
+  let PredicateMethod = "isRegOrImm";
+}
+
+def IntOpSelModsMatchClass : OpSelModsMatchClass;
+def IntOpSelMods : InputMods<IntOpSelModsMatchClass>;
+
 def FPRegSDWAInputModsMatchClass : AsmOperandClass {
   let Name = "SDWARegWithFPInputMods";
   let ParserMethod = "parseRegWithFPInputMods";
@@ -750,6 +793,13 @@ def VOP3OMods : ComplexPattern<untyped, 3, "SelectVOP3OMods">;
 def VOP3PMods  : ComplexPattern<untyped, 2, "SelectVOP3PMods">;
 def VOP3PMods0 : ComplexPattern<untyped, 3, "SelectVOP3PMods0">;
 
+def VOP3OpSel  : ComplexPattern<untyped, 2, "SelectVOP3OpSel">;
+def VOP3OpSel0 : ComplexPattern<untyped, 3, "SelectVOP3OpSel0">;
+
+def VOP3OpSelMods  : ComplexPattern<untyped, 2, "SelectVOP3OpSelMods">;
+def VOP3OpSelMods0 : ComplexPattern<untyped, 3, "SelectVOP3OpSelMods0">;
+
+def VOP3PMadMixMods  : ComplexPattern<untyped, 2, "SelectVOP3PMadMixMods">;
 
 //===----------------------------------------------------------------------===//
 // SI assembler operands
@@ -771,6 +821,7 @@ def SRCMODS {
   int NEG_HI = ABS;
   int OP_SEL_0 = 4;
   int OP_SEL_1 = 8;
+  int DST_OP_SEL = 8;
 }
 
 def DSTCLAMP {
@@ -827,7 +878,7 @@ class EXP_Helper<bit done, SDPatternOperator node = null_frag> : EXPCommon<
 // Split EXP instruction into EXP and EXP_DONE so we can set
 // mayLoad for done=1.
 multiclass EXP_m<bit done, SDPatternOperator node> {
-  let mayLoad = done in {
+  let mayLoad = done, DisableWQM = 1 in {
     let isPseudo = 1, isCodeGenOnly = 1 in {
       def "" : EXP_Helper<done, node>,
                SIMCInstr <"exp"#!if(done, "_done", ""), SIEncodingFamily.NONE>;
@@ -1020,6 +1071,10 @@ class getSrcMod <ValueType VT> {
                      );
 }
 
+class getOpSelMod <ValueType VT> {
+  Operand ret = !if(!eq(VT.Value, f16.Value), FP16InputMods, IntOpSelMods);
+}
+
 // Return type of input modifiers operand specified input operand for DPP
 class getSrcModExt <ValueType VT> {
     bit isFP = !if(!eq(VT.Value, f16.Value), 1,
@@ -1048,7 +1103,7 @@ class getIns32 <RegisterOperand Src0RC, RegisterClass Src1RC, int NumSrcArgs> {
 // Returns the input arguments for VOP3 instructions for the given SrcVT.
 class getIns64 <RegisterOperand Src0RC, RegisterOperand Src1RC,
                 RegisterOperand Src2RC, int NumSrcArgs,
-                bit HasModifiers, bit HasOMod,
+                bit HasIntClamp, bit HasModifiers, bit HasOMod,
                 Operand Src0Mod, Operand Src1Mod, Operand Src2Mod> {
 
   dag ret =
@@ -1063,7 +1118,9 @@ class getIns64 <RegisterOperand Src0RC, RegisterOperand Src1RC,
              clampmod:$clamp, omod:$omod)
       /* else */,
         // VOP1 without modifiers
-        (ins Src0RC:$src0)
+        !if (!eq(HasIntClamp, 1),
+          (ins Src0RC:$src0, clampmod:$clamp),
+          (ins Src0RC:$src0))
       /* endif */ ),
     !if (!eq(NumSrcArgs, 2),
       !if (!eq(HasModifiers, 1),
@@ -1077,7 +1134,10 @@ class getIns64 <RegisterOperand Src0RC, RegisterOperand Src1RC,
                clampmod:$clamp))
       /* else */,
         // VOP2 without modifiers
-        (ins Src0RC:$src0, Src1RC:$src1)
+        !if (!eq(HasIntClamp, 1),
+          (ins Src0RC:$src0, Src1RC:$src1, clampmod:$clamp),
+          (ins Src0RC:$src0, Src1RC:$src1))
+
       /* endif */ )
     /* NumSrcArgs == 3 */,
       !if (!eq(HasModifiers, 1),
@@ -1093,7 +1153,9 @@ class getIns64 <RegisterOperand Src0RC, RegisterOperand Src1RC,
                clampmod:$clamp))
       /* else */,
         // VOP3 without modifiers
-        (ins Src0RC:$src0, Src1RC:$src1, Src2RC:$src2)
+        !if (!eq(HasIntClamp, 1),
+          (ins Src0RC:$src0, Src1RC:$src1, Src2RC:$src2, clampmod:$clamp),
+          (ins Src0RC:$src0, Src1RC:$src1, Src2RC:$src2))
       /* endif */ ))));
 }
 
@@ -1133,8 +1195,40 @@ class getInsVOP3P <RegisterOperand Src0RC, RegisterOperand Src1RC,
   );
 }
 
-class getInsDPP <RegisterClass Src0RC, RegisterClass Src1RC, int NumSrcArgs,
-                 bit HasModifiers, Operand Src0Mod, Operand Src1Mod> {
+class getInsVOP3OpSel <RegisterOperand Src0RC,
+                       RegisterOperand Src1RC,
+                       RegisterOperand Src2RC,
+                       int NumSrcArgs,
+                       bit HasClamp,
+                       Operand Src0Mod,
+                       Operand Src1Mod,
+                       Operand Src2Mod> {
+  dag ret = !if (!eq(NumSrcArgs, 2),
+    !if (HasClamp,
+      (ins Src0Mod:$src0_modifiers, Src0RC:$src0,
+           Src1Mod:$src1_modifiers, Src1RC:$src1,
+           clampmod:$clamp,
+           op_sel:$op_sel),
+      (ins Src0Mod:$src0_modifiers, Src0RC:$src0,
+           Src1Mod:$src1_modifiers, Src1RC:$src1,
+           op_sel:$op_sel)),
+    // else NumSrcArgs == 3
+    !if (HasClamp,
+      (ins Src0Mod:$src0_modifiers, Src0RC:$src0,
+           Src1Mod:$src1_modifiers, Src1RC:$src1,
+           Src2Mod:$src2_modifiers, Src2RC:$src2,
+           clampmod:$clamp,
+           op_sel:$op_sel),
+      (ins Src0Mod:$src0_modifiers, Src0RC:$src0,
+           Src1Mod:$src1_modifiers, Src1RC:$src1,
+           Src2Mod:$src2_modifiers, Src2RC:$src2,
+           op_sel:$op_sel))
+  );
+}
+
+class getInsDPP <RegisterOperand DstRC, RegisterClass Src0RC, RegisterClass Src1RC,
+                 int NumSrcArgs, bit HasModifiers,
+                 Operand Src0Mod, Operand Src1Mod> {
 
   dag ret = !if (!eq(NumSrcArgs, 0),
                 // VOP1 without input operands (V_NOP)
@@ -1143,26 +1237,29 @@ class getInsDPP <RegisterClass Src0RC, RegisterClass Src1RC, int NumSrcArgs,
             !if (!eq(NumSrcArgs, 1),
               !if (!eq(HasModifiers, 1),
                 // VOP1_DPP with modifiers
-                (ins Src0Mod:$src0_modifiers, Src0RC:$src0,
-                     dpp_ctrl:$dpp_ctrl, row_mask:$row_mask,
+                (ins DstRC:$old, Src0Mod:$src0_modifiers,
+                     Src0RC:$src0, dpp_ctrl:$dpp_ctrl, row_mask:$row_mask,
                      bank_mask:$bank_mask, bound_ctrl:$bound_ctrl)
               /* else */,
                 // VOP1_DPP without modifiers
-                (ins Src0RC:$src0, dpp_ctrl:$dpp_ctrl, row_mask:$row_mask,
-                bank_mask:$bank_mask, bound_ctrl:$bound_ctrl)
+                (ins DstRC:$old, Src0RC:$src0,
+                     dpp_ctrl:$dpp_ctrl, row_mask:$row_mask,
+                     bank_mask:$bank_mask, bound_ctrl:$bound_ctrl)
               /* endif */)
               /* NumSrcArgs == 2 */,
               !if (!eq(HasModifiers, 1),
                 // VOP2_DPP with modifiers
-                (ins Src0Mod:$src0_modifiers, Src0RC:$src0,
+                (ins DstRC:$old,
+                     Src0Mod:$src0_modifiers, Src0RC:$src0,
                      Src1Mod:$src1_modifiers, Src1RC:$src1,
                      dpp_ctrl:$dpp_ctrl, row_mask:$row_mask,
                      bank_mask:$bank_mask, bound_ctrl:$bound_ctrl)
               /* else */,
                 // VOP2_DPP without modifiers
-                (ins Src0RC:$src0, Src1RC:$src1, dpp_ctrl:$dpp_ctrl,
-                row_mask:$row_mask, bank_mask:$bank_mask,
-                bound_ctrl:$bound_ctrl)
+                (ins DstRC:$old,
+                     Src0RC:$src0, Src1RC:$src1, dpp_ctrl:$dpp_ctrl,
+                     row_mask:$row_mask, bank_mask:$bank_mask,
+                     bound_ctrl:$bound_ctrl)
              /* endif */)));
 }
 
@@ -1246,7 +1343,7 @@ class getAsm32 <bit HasDst, int NumSrcArgs, ValueType DstVT = i32> {
 
 // Returns the assembly string for the inputs and outputs of a VOP3
 // instruction.
-class getAsm64 <bit HasDst, int NumSrcArgs, bit HasModifiers,
+class getAsm64 <bit HasDst, int NumSrcArgs, bit HasIntClamp, bit HasModifiers,
                 bit HasOMod, ValueType DstVT = i32> {
   string dst = !if(!eq(DstVT.Size, 1), "$sdst", "$vdst"); // use $sdst for VOPC
   string src0 = !if(!eq(NumSrcArgs, 1), "$src0_modifiers", "$src0_modifiers,");
@@ -1254,9 +1351,10 @@ class getAsm64 <bit HasDst, int NumSrcArgs, bit HasModifiers,
                    !if(!eq(NumSrcArgs, 2), " $src1_modifiers",
                                            " $src1_modifiers,"));
   string src2 = !if(!eq(NumSrcArgs, 3), " $src2_modifiers", "");
+  string iclamp = !if(HasIntClamp, "$clamp", "");
   string ret =
   !if(!eq(HasModifiers, 0),
-      getAsm32<HasDst, NumSrcArgs, DstVT>.ret,
+      getAsm32<HasDst, NumSrcArgs, DstVT>.ret # iclamp,
       dst#", "#src0#src1#src2#"$clamp"#!if(HasOMod, "$omod", ""));
 }
 
@@ -1277,6 +1375,34 @@ class getAsmVOP3P <bit HasDst, int NumSrcArgs, bit HasModifiers,
   // Each modifier is printed as an array of bits for each operand, so
   // all operands are printed as part of src0_modifiers.
   string ret = dst#", "#src0#src1#src2#"$op_sel$op_sel_hi"#mods#clamp;
+}
+
+class getAsmVOP3OpSel <int NumSrcArgs,
+                       bit HasClamp,
+                       bit Src0HasMods,
+                       bit Src1HasMods,
+                       bit Src2HasMods> {
+  string dst = " $vdst";
+
+  string isrc0 = !if(!eq(NumSrcArgs, 1), "$src0", "$src0,");
+  string isrc1 = !if(!eq(NumSrcArgs, 1), "",
+                     !if(!eq(NumSrcArgs, 2), " $src1",
+                                             " $src1,"));
+  string isrc2 = !if(!eq(NumSrcArgs, 3), " $src2", "");
+
+  string fsrc0 = !if(!eq(NumSrcArgs, 1), "$src0_modifiers", "$src0_modifiers,");
+  string fsrc1 = !if(!eq(NumSrcArgs, 1), "",
+                     !if(!eq(NumSrcArgs, 2), " $src1_modifiers",
+                                             " $src1_modifiers,"));
+  string fsrc2 = !if(!eq(NumSrcArgs, 3), " $src2_modifiers", "");
+
+  string src0 = !if(Src0HasMods, fsrc0, isrc0);
+  string src1 = !if(Src1HasMods, fsrc1, isrc1);
+  string src2 = !if(Src2HasMods, fsrc2, isrc2);
+
+  string clamp = !if(HasClamp, "$clamp", "");
+
+  string ret = dst#", "#src0#src1#src2#"$op_sel"#clamp;
 }
 
 class getAsmDPP <bit HasDst, int NumSrcArgs, bit HasModifiers, ValueType DstVT = i32> {
@@ -1433,10 +1559,14 @@ class VOPProfile <list<ValueType> _ArgVT> {
   field bit HasClamp = HasModifiers;
   field bit HasSDWAClamp = EmitDst;
   field bit HasFPClamp = BitAnd<isFloatType<DstVT>.ret, HasClamp>.ret;
+  field bit HasIntClamp = !if(isFloatType<DstVT>.ret, 0, HasClamp);
+  field bit HasClampLo = HasClamp;
+  field bit HasClampHi = BitAnd<isPackedType<DstVT>.ret, HasClamp>.ret;
+  field bit HasHigh = 0;
 
   field bit IsPacked = isPackedType<Src0VT>.ret;
   field bit HasOpSel = IsPacked;
-  field bit HasOMod = !if(HasOpSel, 0, HasModifiers);
+  field bit HasOMod = !if(HasOpSel, 0, isFloatType<DstVT>.ret);
   field bit HasSDWAOMod = isFloatType<DstVT>.ret;
 
   field bit HasExt = getHasExt<NumSrcArgs, DstVT, Src0VT, Src1VT>.ret;
@@ -1457,13 +1587,18 @@ class VOPProfile <list<ValueType> _ArgVT> {
 
   field dag Ins32 = getIns32<Src0RC32, Src1RC32, NumSrcArgs>.ret;
   field dag Ins64 = getIns64<Src0RC64, Src1RC64, Src2RC64, NumSrcArgs,
-                             HasModifiers, HasOMod, Src0Mod, Src1Mod,
+                             HasIntClamp, HasModifiers, HasOMod, Src0Mod, Src1Mod,
                              Src2Mod>.ret;
   field dag InsVOP3P = getInsVOP3P<Src0RC64, Src1RC64, Src2RC64,
                                    NumSrcArgs, HasClamp,
                                    Src0PackedMod, Src1PackedMod, Src2PackedMod>.ret;
-
-  field dag InsDPP = getInsDPP<Src0DPP, Src1DPP, NumSrcArgs,
+  field dag InsVOP3OpSel = getInsVOP3OpSel<Src0RC64, Src1RC64, Src2RC64,
+                                           NumSrcArgs,
+                                           HasClamp,
+                                           getOpSelMod<Src0VT>.ret,
+                                           getOpSelMod<Src1VT>.ret,
+                                           getOpSelMod<Src2VT>.ret>.ret;
+  field dag InsDPP = getInsDPP<DstRCDPP, Src0DPP, Src1DPP, NumSrcArgs,
                                HasModifiers, Src0ModDPP, Src1ModDPP>.ret;
   field dag InsSDWA = getInsSDWA<Src0SDWA, Src1SDWA, NumSrcArgs,
                                  HasSDWAOMod, Src0ModSDWA, Src1ModSDWA,
@@ -1471,8 +1606,13 @@ class VOPProfile <list<ValueType> _ArgVT> {
 
 
   field string Asm32 = getAsm32<HasDst, NumSrcArgs, DstVT>.ret;
-  field string Asm64 = getAsm64<HasDst, NumSrcArgs, HasModifiers, HasOMod, DstVT>.ret;
+  field string Asm64 = getAsm64<HasDst, NumSrcArgs, HasIntClamp, HasModifiers, HasOMod, DstVT>.ret;
   field string AsmVOP3P = getAsmVOP3P<HasDst, NumSrcArgs, HasModifiers, HasClamp, DstVT>.ret;
+  field string AsmVOP3OpSel = getAsmVOP3OpSel<NumSrcArgs,
+                                              HasClamp,
+                                              HasSrc0FloatMods,
+                                              HasSrc1FloatMods,
+                                              HasSrc2FloatMods>.ret;
   field string AsmDPP = getAsmDPP<HasDst, NumSrcArgs, HasModifiers, DstVT>.ret;
   field string AsmSDWA = getAsmSDWA<HasDst, NumSrcArgs, DstVT>.ret;
   field string AsmSDWA9 = getAsmSDWA9<HasDst, HasSDWAOMod, NumSrcArgs, DstVT>.ret;
@@ -1495,12 +1635,16 @@ def VOP_I16_I16_I16 : VOPProfile <[i16, i16, i16, untyped]>;
 def VOP_I16_I16_I16_I16 : VOPProfile <[i16, i16, i16, i16, untyped]>;
 def VOP_F16_F16_F16_F16 : VOPProfile <[f16, f16, f16, f16, untyped]>;
 
+def VOP_I32_I16_I16_I32 : VOPProfile <[i32, i16, i16, i32, untyped]>;
+
 def VOP_V2F16_V2F16_V2F16 : VOPProfile <[v2f16, v2f16, v2f16, untyped]>;
 def VOP_V2I16_V2I16_V2I16 : VOPProfile <[v2i16, v2i16, v2i16, untyped]>;
 def VOP_B32_F16_F16 : VOPProfile <[i32, f16, f16, untyped]>;
 
 def VOP_V2F16_V2F16_V2F16_V2F16 : VOPProfile <[v2f16, v2f16, v2f16, v2f16]>;
 def VOP_V2I16_V2I16_V2I16_V2I16 : VOPProfile <[v2i16, v2i16, v2i16, v2i16]>;
+
+def VOP_F32_V2F16_V2F16_V2F16 : VOPProfile <[f32, v2f16, v2f16, v2f16]>;
 
 def VOP_NONE : VOPProfile <[untyped, untyped, untyped, untyped]>;
 
@@ -1525,6 +1669,7 @@ def VOP_I32_F32_F32 : VOPProfile <[i32, f32, f32, untyped]>;
 def VOP_I32_F32_I32 : VOPProfile <[i32, f32, i32, untyped]>;
 def VOP_I32_I32_I32 : VOPProfile <[i32, i32, i32, untyped]>;
 def VOP_V2F16_F32_F32 : VOPProfile <[v2f16, f32, f32, untyped]>;
+def VOP_F32_F16_F16_F16 : VOPProfile <[f32, f16, f16, f16]>;
 
 def VOP_I64_I64_I32 : VOPProfile <[i64, i64, i32, untyped]>;
 def VOP_I64_I32_I64 : VOPProfile <[i64, i32, i64, untyped]>;
@@ -1664,7 +1809,8 @@ def getMCOpcodeGen : InstrMapping {
   let ValueCols = [[!cast<string>(SIEncodingFamily.SI)],
                    [!cast<string>(SIEncodingFamily.VI)],
                    [!cast<string>(SIEncodingFamily.SDWA)],
-                   [!cast<string>(SIEncodingFamily.SDWA9)]];
+                   [!cast<string>(SIEncodingFamily.SDWA9)],
+                   [!cast<string>(SIEncodingFamily.GFX9)]];
 }
 
 // Get equivalent SOPK instruction.
@@ -1703,7 +1849,6 @@ def getAtomicNoRetOp : InstrMapping {
 }
 
 include "SIInstructions.td"
-include "CIInstructions.td"
 
 include "DSInstructions.td"
 include "MIMGInstructions.td"

@@ -34,9 +34,9 @@
 #include <type_traits>
 #include <vector>
 
-namespace llvm {
-
 #define DEBUG_TYPE "region"
+
+namespace llvm {
 
 //===----------------------------------------------------------------------===//
 /// RegionBase Implementation
@@ -175,6 +175,29 @@ typename RegionBase<Tr>::BlockT *RegionBase<Tr>::getEnteringBlock() const {
   }
 
   return enteringBlock;
+}
+
+template <class Tr>
+bool RegionBase<Tr>::getExitingBlocks(
+    SmallVectorImpl<BlockT *> &Exitings) const {
+  bool CoverAll = true;
+
+  if (!exit)
+    return CoverAll;
+
+  for (PredIterTy PI = InvBlockTraits::child_begin(exit),
+                  PE = InvBlockTraits::child_end(exit);
+       PI != PE; ++PI) {
+    BlockT *Pred = *PI;
+    if (contains(Pred)) {
+      Exitings.push_back(Pred);
+      continue;
+    }
+
+    CoverAll = false;
+  }
+
+  return CoverAll;
 }
 
 template <class Tr>
@@ -901,8 +924,8 @@ void RegionInfoBase<Tr>::calculate(FuncT &F) {
   buildRegionsTree(DT->getNode(BB), TopLevelRegion);
 }
 
-#undef DEBUG_TYPE
-
 } // end namespace llvm
+
+#undef DEBUG_TYPE
 
 #endif // LLVM_ANALYSIS_REGIONINFOIMPL_H

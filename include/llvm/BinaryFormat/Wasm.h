@@ -94,9 +94,10 @@ struct WasmFunction {
 };
 
 struct WasmDataSegment {
-  uint32_t Index;
+  uint32_t MemoryIndex;
   WasmInitExpr Offset;
   ArrayRef<uint8_t> Content;
+  StringRef Name;
 };
 
 struct WasmElemSegment {
@@ -107,7 +108,7 @@ struct WasmElemSegment {
 
 struct WasmRelocation {
   uint32_t Type;   // The type of the relocation.
-  int32_t Index;   // Index into function to global index space.
+  uint32_t Index;  // Index into function to global index space.
   uint64_t Offset; // Offset from the start of the section.
   int64_t Addend;  // A value to add to the symbol.
 };
@@ -184,10 +185,15 @@ enum : unsigned {
   WASM_SYMBOL_INFO    = 0x2,
   WASM_DATA_SIZE      = 0x3,
   WASM_DATA_ALIGNMENT = 0x4,
+  WASM_SEGMENT_NAMES  = 0x5,
 };
 
+const unsigned WASM_SYMBOL_BINDING_MASK = 0x3;
+
 enum : unsigned {
-  WASM_SYMBOL_FLAG_WEAK = 0x1,
+  WASM_SYMBOL_BINDING_GLOBAL = 0x0,
+  WASM_SYMBOL_BINDING_WEAK   = 0x1,
+  WASM_SYMBOL_BINDING_LOCAL  = 0x2,
 };
 
 #define WASM_RELOC(name, value) name = value,

@@ -54,22 +54,27 @@ std::unique_ptr<WasmYAML::CustomSection> WasmDumper::dumpCustomSection(const Was
   if (WasmSec.Name == "name") {
     std::unique_ptr<WasmYAML::NameSection> NameSec = make_unique<WasmYAML::NameSection>();
     for (const object::SymbolRef& Sym: Obj.symbols()) {
-      uint32_t Flags = Sym.getFlags();
-      // Skip over symbols that come from imports or exports
-      if (Flags &
-          (object::SymbolRef::SF_Global | object::SymbolRef::SF_Undefined))
-        continue;
-      Expected<StringRef> NameOrError = Sym.getName();
-      if (!NameOrError)
+      const object::WasmSymbol Symbol = Obj.getWasmSymbol(Sym);
+      if (Symbol.Type != object::WasmSymbol::SymbolType::DEBUG_FUNCTION_NAME)
         continue;
       WasmYAML::NameEntry NameEntry;
-      NameEntry.Name = *NameOrError;
+      NameEntry.Name = Symbol.Name;
       NameEntry.Index = Sym.getValue();
       NameSec->FunctionNames.push_back(NameEntry);
     }
     CustomSec = std::move(NameSec);
   } else if (WasmSec.Name == "linking") {
     std::unique_ptr<WasmYAML::LinkingSection> LinkingSec = make_unique<WasmYAML::LinkingSection>();
+    size_t Index = 0;
+    for (const object::WasmSegment &Segment : Obj.dataSegments()) {
+      if (!Segment.Data.Name.empty()) {
+        WasmYAML::NameEntry NameEntry;
+        NameEntry.Name = Segment.Data.Name;
+        NameEntry.Index = Index;
+        LinkingSec->SegmentNames.push_back(NameEntry);
+      }
+      Index++;
+    }
     for (const object::SymbolRef& Sym: Obj.symbols()) {
       const object::WasmSymbol Symbol = Obj.getWasmSymbol(Sym);
       if (Symbol.Flags != 0) {
@@ -234,11 +239,12 @@ ErrorOr<WasmYAML::Object *> WasmDumper::dump() {
     }
     case wasm::WASM_SEC_DATA: {
       auto DataSec = make_unique<WasmYAML::DataSection>();
-      for (auto &Segment : Obj.dataSegments()) {
+      for (const object::WasmSegment &Segment : Obj.dataSegments()) {
         WasmYAML::DataSegment Seg;
-        Seg.Index = Segment.Index;
-        Seg.Offset = Segment.Offset;
-        Seg.Content = yaml::BinaryRef(Segment.Content);
+        Seg.SectionOffset = Segment.SectionOffset;
+        Seg.MemoryIndex = Segment.Data.MemoryIndex;
+        Seg.Offset = Segment.Data.Offset;
+        Seg.Content = yaml::BinaryRef(Segment.Data.Content);
         DataSec->Segments.push_back(Seg);
       }
       S = std::move(DataSec);
