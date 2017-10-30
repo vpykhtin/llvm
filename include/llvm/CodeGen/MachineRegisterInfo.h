@@ -575,9 +575,7 @@ public:
   /// preserve conservative kill flag information.
   void clearKillFlags(unsigned Reg) const;
 
-#ifndef NDEBUG
   void dumpUses(unsigned RegNo) const;
-#endif
 
   /// Returns true if PhysReg is unallocatable and constant throughout the
   /// function. Writing to a constant register has no effect.
@@ -806,6 +804,14 @@ public:
   bool isReserved(unsigned PhysReg) const {
     return getReservedRegs().test(PhysReg);
   }
+
+  /// Returns true when the given register unit is considered reserved.
+  ///
+  /// Register units are considered reserved when for at least one of their
+  /// root registers, the root register and all super registers are reserved.
+  /// This currently iterates the register hierarchy and may be slower than
+  /// expected.
+  bool isReservedRegUnit(unsigned Unit) const;
 
   /// isAllocatable - Returns true when PhysReg belongs to an allocatable
   /// register class and it hasn't been reserved.

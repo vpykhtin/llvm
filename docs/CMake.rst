@@ -248,9 +248,10 @@ LLVM-specific variables
 
 **LLVM_APPEND_VC_REV**:BOOL
   Embed version control revision info (svn revision number or Git revision id).
-  This is used among other things in the LLVM version string (stored in the
-  PACKAGE_VERSION macro). For this to work cmake must be invoked before the
-  build. Defaults to ON.
+  The version info is provided by the ``LLVM_REVISION`` macro in
+  ``llvm/include/llvm/Support/VCSRevision.h``. Developers using git who don't
+  need revision info can disable this option to avoid re-linking most binaries
+  after a branch switch. Defaults to ON.
 
 **LLVM_ENABLE_THREADS**:BOOL
   Build with threads support, if available. Defaults to ON.
@@ -535,6 +536,16 @@ LLVM-specific variables
   generate a Release build tree to build a fully optimized tablegen for use
   during the build. Enabling this option can significantly speed up build times
   especially when building LLVM in Debug configurations.
+
+**LLVM_REVERSE_ITERATION**:BOOL
+  If enabled, all supported unordered llvm containers would be iterated in
+  reverse order. This is useful for uncovering non-determinism caused by
+  iteration of unordered containers.
+
+**LLVM_BUILD_INSTRUMENTED_COVERAGE**:BOOL
+  If enabled, `source-based code coverage
+  <http://clang.llvm.org/docs/SourceBasedCodeCoverage.html>`_ instrumentation
+  is enabled while building llvm.
 
 CMake Caches
 ============

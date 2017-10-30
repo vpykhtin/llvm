@@ -430,6 +430,27 @@ enum {
 #include "ELFRelocs/ARM.def"
 };
 
+// ARC Specific e_flags
+enum : unsigned {
+  EF_ARC_MACH_MSK = 0x000000ff,
+  EF_ARC_OSABI_MSK = 0x00000f00,
+  E_ARC_MACH_ARC600 = 0x00000002,
+  E_ARC_MACH_ARC601 = 0x00000004,
+  E_ARC_MACH_ARC700 = 0x00000003,
+  EF_ARC_CPU_ARCV2EM = 0x00000005,
+  EF_ARC_CPU_ARCV2HS = 0x00000006,
+  E_ARC_OSABI_ORIG = 0x00000000,
+  E_ARC_OSABI_V2 = 0x00000200,
+  E_ARC_OSABI_V3 = 0x00000300,
+  E_ARC_OSABI_V4 = 0x00000400,
+  EF_ARC_PIC = 0x00000100
+};
+
+// ELF Relocation types for ARC
+enum {
+#include "ELFRelocs/ARC.def"
+};
+
 // AVR specific e_flags
 enum : unsigned {
   EF_AVR_ARCH_AVR1 = 1,
@@ -589,6 +610,17 @@ enum {
 // ELF Relocation type for Lanai.
 enum {
 #include "ELFRelocs/Lanai.def"
+};
+
+// RISCV Specific e_flags
+enum : unsigned {
+  EF_RISCV_RVC = 0x0001,
+  EF_RISCV_FLOAT_ABI = 0x0006,
+  EF_RISCV_FLOAT_ABI_SOFT = 0x0000,
+  EF_RISCV_FLOAT_ABI_SINGLE = 0x0002,
+  EF_RISCV_FLOAT_ABI_DOUBLE = 0x0004,
+  EF_RISCV_FLOAT_ABI_QUAD = 0x0006,
+  EF_RISCV_RVE = 0x0008
 };
 
 // ELF Relocation types for RISC-V

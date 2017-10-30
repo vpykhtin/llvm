@@ -343,6 +343,8 @@ class MipsAsmParser : public MCTargetAsmParser {
   bool parseSetPushDirective();
   bool parseSetSoftFloatDirective();
   bool parseSetHardFloatDirective();
+  bool parseSetMtDirective();
+  bool parseSetNoMtDirective();
 
   bool parseSetAssignment();
 
@@ -461,6 +463,9 @@ public:
     Match_RequiresSameSrcAndDst,
     Match_NoFCCRegisterForCurrentISA,
     Match_NonZeroOperandForSync,
+    Match_RequiresPosSizeRange0_32,
+    Match_RequiresPosSizeRange33_64,
+    Match_RequiresPosSizeUImm6,
 #define GET_OPERAND_DIAGNOSTIC_TYPES
 #include "MipsGenAsmMatcher.inc"
 #undef GET_OPERAND_DIAGNOSTIC_TYPES
@@ -627,6 +632,9 @@ public:
 
   bool useSoftFloat() const {
     return getSTI().getFeatureBits()[Mips::FeatureSoftFloat];
+  }
+  bool hasMT() const {
+    return getSTI().getFeatureBits()[Mips::FeatureMT];
   }
 
   /// Warn if RegIndex is the same as the current AT.
@@ -1966,6 +1974,7 @@ bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
   case Mips::SDIV_MM:
     FirstOp = 0;
     SecondOp = 1;
+    LLVM_FALLTHROUGH;
   case Mips::SDivMacro:
   case Mips::DSDivMacro:
   case Mips::UDivMacro:
@@ -4971,6 +4980,50 @@ unsigned MipsAsmParser::checkTargetMatchPredicate(MCInst &Inst) {
     if (Inst.getOperand(0).getReg() == Inst.getOperand(1).getReg())
       return Match_RequiresDifferentOperands;
     return Match_Success;
+  case Mips::DINS:
+  case Mips::DINS_MM64R6: {
+    assert(Inst.getOperand(2).isImm() && Inst.getOperand(3).isImm() &&
+           "Operands must be immediates for dins!");
+    const signed Pos = Inst.getOperand(2).getImm();
+    const signed Size = Inst.getOperand(3).getImm();
+    if ((0 > (Pos + Size)) || ((Pos + Size) > 32))
+      return Match_RequiresPosSizeRange0_32;
+    return Match_Success;
+  }
+  case Mips::DINSM:
+  case Mips::DINSM_MM64R6:
+  case Mips::DINSU:
+  case Mips::DINSU_MM64R6: {
+    assert(Inst.getOperand(2).isImm() && Inst.getOperand(3).isImm() &&
+           "Operands must be immediates for dinsm/dinsu!");
+    const signed Pos = Inst.getOperand(2).getImm();
+    const signed Size = Inst.getOperand(3).getImm();
+    if ((32 >= (Pos + Size)) || ((Pos + Size) > 64))
+      return Match_RequiresPosSizeRange33_64;
+    return Match_Success;
+  }
+  case Mips::DEXT:
+  case Mips::DEXT_MM64R6: {
+    assert(Inst.getOperand(2).isImm() && Inst.getOperand(3).isImm() &&
+           "Operands must be immediates for DEXTM!");
+    const signed Pos = Inst.getOperand(2).getImm();
+    const signed Size = Inst.getOperand(3).getImm();
+    if ((1 > (Pos + Size)) || ((Pos + Size) > 63))
+      return Match_RequiresPosSizeUImm6;
+    return Match_Success;
+  }
+  case Mips::DEXTM:
+  case Mips::DEXTU:
+  case Mips::DEXTM_MM64R6:
+  case Mips::DEXTU_MM64R6: {
+    assert(Inst.getOperand(2).isImm() && Inst.getOperand(3).isImm() &&
+           "Operands must be immediates for dextm/dextu!");
+    const signed Pos = Inst.getOperand(2).getImm();
+    const signed Size = Inst.getOperand(3).getImm();
+    if ((32 > (Pos + Size)) || ((Pos + Size) > 64))
+      return Match_RequiresPosSizeRange33_64;
+    return Match_Success;
+  }
   }
 
   uint64_t TSFlags = getInstDesc(Inst.getOpcode()).TSFlags;
@@ -5116,6 +5169,7 @@ bool MipsAsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
                  "expected 11-bit signed immediate");
   case Match_UImm16:
   case Match_UImm16_Relaxed:
+  case Match_UImm16_AltRelaxed:
     return Error(RefineErrorLoc(IDLoc, Operands, ErrorInfo),
                  "expected 16-bit unsigned immediate");
   case Match_SImm16:
@@ -5162,6 +5216,24 @@ bool MipsAsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
   case Match_MemSImm16:
     return Error(RefineErrorLoc(IDLoc, Operands, ErrorInfo),
                  "expected memory with 16-bit signed offset");
+  case Match_RequiresPosSizeRange0_32: {
+    SMLoc ErrorStart = Operands[3]->getStartLoc();
+    SMLoc ErrorEnd = Operands[4]->getEndLoc();
+    return Error(ErrorStart, "size plus position are not in the range 0 .. 32",
+                 SMRange(ErrorStart, ErrorEnd));
+    }
+  case Match_RequiresPosSizeUImm6: {
+    SMLoc ErrorStart = Operands[3]->getStartLoc();
+    SMLoc ErrorEnd = Operands[4]->getEndLoc();
+    return Error(ErrorStart, "size plus position are not in the range 1 .. 63",
+                 SMRange(ErrorStart, ErrorEnd));
+    }
+  case Match_RequiresPosSizeRange33_64: {
+    SMLoc ErrorStart = Operands[3]->getStartLoc();
+    SMLoc ErrorEnd = Operands[4]->getEndLoc();
+    return Error(ErrorStart, "size plus position are not in the range 33 .. 64",
+                 SMRange(ErrorStart, ErrorEnd));
+    }
   }
 
   llvm_unreachable("Implement any new match types added!");
@@ -5433,12 +5505,12 @@ bool MipsAsmParser::isEvaluated(const MCExpr *Expr) {
     return true;
   case MCExpr::SymbolRef:
     return (cast<MCSymbolRefExpr>(Expr)->getKind() != MCSymbolRefExpr::VK_None);
-  case MCExpr::Binary:
-    if (const MCBinaryExpr *BE = dyn_cast<MCBinaryExpr>(Expr)) {
-      if (!isEvaluated(BE->getLHS()))
-        return false;
-      return isEvaluated(BE->getRHS());
-    }
+  case MCExpr::Binary: {
+    const MCBinaryExpr *BE = cast<MCBinaryExpr>(Expr);
+    if (!isEvaluated(BE->getLHS()))
+      return false;
+    return isEvaluated(BE->getRHS());
+  }
   case MCExpr::Unary:
     return isEvaluated(cast<MCUnaryExpr>(Expr)->getSubExpr());
   case MCExpr::Target:
@@ -6329,6 +6401,39 @@ bool MipsAsmParser::parseSetNoOddSPRegDirective() {
   return false;
 }
 
+bool MipsAsmParser::parseSetMtDirective() {
+  MCAsmParser &Parser = getParser();
+  Parser.Lex(); // Eat "mt".
+
+  // If this is not the end of the statement, report an error.
+  if (getLexer().isNot(AsmToken::EndOfStatement)) {
+    reportParseError("unexpected token, expected end of statement");
+    return false;
+  }
+
+  setFeatureBits(Mips::FeatureMT, "mt");
+  getTargetStreamer().emitDirectiveSetMt();
+  Parser.Lex(); // Consume the EndOfStatement.
+  return false;
+}
+
+bool MipsAsmParser::parseSetNoMtDirective() {
+  MCAsmParser &Parser = getParser();
+  Parser.Lex(); // Eat "nomt".
+
+  // If this is not the end of the statement, report an error.
+  if (getLexer().isNot(AsmToken::EndOfStatement)) {
+    reportParseError("unexpected token, expected end of statement");
+    return false;
+  }
+
+  clearFeatureBits(Mips::FeatureMT, "mt");
+
+  getTargetStreamer().emitDirectiveSetNoMt();
+  Parser.Lex(); // Consume the EndOfStatement.
+  return false;
+}
+
 bool MipsAsmParser::parseSetPopDirective() {
   MCAsmParser &Parser = getParser();
   SMLoc Loc = getLexer().getLoc();
@@ -6829,6 +6934,10 @@ bool MipsAsmParser::parseDirectiveSet() {
     return parseSetMsaDirective();
   } else if (Tok.getString() == "nomsa") {
     return parseSetNoMsaDirective();
+  } else if (Tok.getString() == "mt") {
+    return parseSetMtDirective();
+  } else if (Tok.getString() == "nomt") {
+    return parseSetNoMtDirective();
   } else if (Tok.getString() == "softfloat") {
     return parseSetSoftFloatDirective();
   } else if (Tok.getString() == "hardfloat") {
@@ -7078,6 +7187,7 @@ bool MipsAsmParser::parseSSectionDirective(StringRef Section, unsigned Type) {
 ///  ::= .module fp=value
 ///  ::= .module softfloat
 ///  ::= .module hardfloat
+///  ::= .module mt
 bool MipsAsmParser::parseDirectiveModule() {
   MCAsmParser &Parser = getParser();
   MCAsmLexer &Lexer = getLexer();
@@ -7169,6 +7279,25 @@ bool MipsAsmParser::parseDirectiveModule() {
     // If generating ELF, don't do anything (the .MIPS.abiflags section gets
     // emitted later).
     getTargetStreamer().emitDirectiveModuleHardFloat();
+
+    // If this is not the end of the statement, report an error.
+    if (getLexer().isNot(AsmToken::EndOfStatement)) {
+      reportParseError("unexpected token, expected end of statement");
+      return false;
+    }
+
+    return false; // parseDirectiveModule has finished successfully.
+  } else if (Option == "mt") {
+    setModuleFeatureBits(Mips::FeatureMT, "mt");
+
+    // Synchronize the ABI Flags information with the FeatureBits information we
+    // updated above.
+    getTargetStreamer().updateABIInfo(*this);
+
+    // If printing assembly, use the recently updated ABI Flags information.
+    // If generating ELF, don't do anything (the .MIPS.abiflags section gets
+    // emitted later).
+    getTargetStreamer().emitDirectiveModuleMT();
 
     // If this is not the end of the statement, report an error.
     if (getLexer().isNot(AsmToken::EndOfStatement)) {

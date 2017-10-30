@@ -347,6 +347,9 @@
 /* Has gcc/MSVC atomic intrinsics */
 #cmakedefine01 LLVM_HAS_ATOMICS
 
+/* Define if LLVM_ENABLE_DUMP is enabled */
+#cmakedefine LLVM_ENABLE_DUMP
+
 /* Host triple LLVM will be executed on */
 #cmakedefine LLVM_HOST_TRIPLE "${LLVM_HOST_TRIPLE}"
 
@@ -382,6 +385,9 @@
 
 /* LLVM version string */
 #define LLVM_VERSION_STRING "${PACKAGE_VERSION}"
+
+/* Define if libxml2 is supported on this platform. */
+#cmakedefine LLVM_LIBXML2_ENABLED ${LLVM_LIBXML2_ENABLED}
 
 /* Define to the extension used for shared libraries, say, ".so". */
 #cmakedefine LTDL_SHLIB_EXT "${LTDL_SHLIB_EXT}"

@@ -39,6 +39,21 @@ void ScalarEnumerationTraits<ELFYAML::ELF_ET>::enumeration(
   IO.enumFallback<Hex16>(Value);
 }
 
+void ScalarEnumerationTraits<ELFYAML::ELF_PT>::enumeration(
+    IO &IO, ELFYAML::ELF_PT &Value) {
+#define ECase(X) IO.enumCase(Value, #X, ELF::X)
+  ECase(PT_NULL);
+  ECase(PT_LOAD);
+  ECase(PT_DYNAMIC);
+  ECase(PT_INTERP);
+  ECase(PT_NOTE);
+  ECase(PT_SHLIB);
+  ECase(PT_PHDR);
+  ECase(PT_TLS);
+#undef ECase
+  IO.enumFallback<Hex32>(Value);
+}
+
 void ScalarEnumerationTraits<ELFYAML::ELF_EM>::enumeration(
     IO &IO, ELFYAML::ELF_EM &Value) {
 #define ECase(X) IO.enumCase(Value, #X, ELF::X)
@@ -412,6 +427,14 @@ void ScalarEnumerationTraits<ELFYAML::ELF_SHT>::enumeration(
 #undef ECase
 }
 
+void ScalarBitSetTraits<ELFYAML::ELF_PF>::bitset(IO &IO,
+                                                 ELFYAML::ELF_PF &Value) {
+#define BCase(X) IO.bitSetCase(Value, #X, ELF::X)
+  BCase(PF_X);
+  BCase(PF_W);
+  BCase(PF_R);
+}
+
 void ScalarBitSetTraits<ELFYAML::ELF_SHF>::bitset(IO &IO,
                                                   ELFYAML::ELF_SHF &Value) {
   const auto *Object = static_cast<ELFYAML::Object *>(IO.getContext());
@@ -452,6 +475,28 @@ void ScalarBitSetTraits<ELFYAML::ELF_SHF>::bitset(IO &IO,
     break;
   }
 #undef BCase
+}
+
+void ScalarEnumerationTraits<ELFYAML::ELF_SHN>::enumeration(
+    IO &IO, ELFYAML::ELF_SHN &Value) {
+#define ECase(X) IO.enumCase(Value, #X, ELF::X)
+  ECase(SHN_UNDEF);
+  ECase(SHN_LORESERVE);
+  ECase(SHN_LOPROC);
+  ECase(SHN_HIPROC);
+  ECase(SHN_LOOS);
+  ECase(SHN_HIOS);
+  ECase(SHN_ABS);
+  ECase(SHN_COMMON);
+  ECase(SHN_XINDEX);
+  ECase(SHN_HIRESERVE);
+  ECase(SHN_HEXAGON_SCOMMON);
+  ECase(SHN_HEXAGON_SCOMMON_1);
+  ECase(SHN_HEXAGON_SCOMMON_2);
+  ECase(SHN_HEXAGON_SCOMMON_4);
+  ECase(SHN_HEXAGON_SCOMMON_8);
+#undef ECase
+  IO.enumFallback<Hex32>(Value);
 }
 
 void ScalarEnumerationTraits<ELFYAML::ELF_STT>::enumeration(
@@ -531,6 +576,9 @@ void ScalarEnumerationTraits<ELFYAML::ELF_REL>::enumeration(
     break;
   case ELF::EM_ARM:
 #include "llvm/BinaryFormat/ELFRelocs/ARM.def"
+    break;
+  case ELF::EM_ARC:
+#include "llvm/BinaryFormat/ELFRelocs/ARC.def"
     break;
   case ELF::EM_RISCV:
 #include "llvm/BinaryFormat/ELFRelocs/RISCV.def"
@@ -649,6 +697,15 @@ void MappingTraits<ELFYAML::FileHeader>::mapping(IO &IO,
   IO.mapOptional("Entry", FileHdr.Entry, Hex64(0));
 }
 
+void MappingTraits<ELFYAML::ProgramHeader>::mapping(
+    IO &IO, ELFYAML::ProgramHeader &Phdr) {
+  IO.mapRequired("Type", Phdr.Type);
+  IO.mapOptional("Flags", Phdr.Flags, ELFYAML::ELF_PF(0));
+  IO.mapOptional("Sections", Phdr.Sections);
+  IO.mapOptional("VAddr", Phdr.VAddr, Hex64(0));
+  IO.mapOptional("PAddr", Phdr.PAddr, Hex64(0));
+}
+
 namespace {
 
 struct NormalizedOther {
@@ -669,12 +726,27 @@ void MappingTraits<ELFYAML::Symbol>::mapping(IO &IO, ELFYAML::Symbol &Symbol) {
   IO.mapOptional("Name", Symbol.Name, StringRef());
   IO.mapOptional("Type", Symbol.Type, ELFYAML::ELF_STT(0));
   IO.mapOptional("Section", Symbol.Section, StringRef());
+  IO.mapOptional("Index", Symbol.Index);
   IO.mapOptional("Value", Symbol.Value, Hex64(0));
   IO.mapOptional("Size", Symbol.Size, Hex64(0));
 
   MappingNormalization<NormalizedOther, uint8_t> Keys(IO, Symbol.Other);
   IO.mapOptional("Visibility", Keys->Visibility, ELFYAML::ELF_STV(0));
   IO.mapOptional("Other", Keys->Other, ELFYAML::ELF_STO(0));
+}
+
+StringRef MappingTraits<ELFYAML::Symbol>::validate(IO &IO,
+                                                   ELFYAML::Symbol &Symbol) {
+  if (Symbol.Index && Symbol.Section.data()) {
+    return "Index and Section cannot both be specified for Symbol";
+  }
+  if (Symbol.Index && *Symbol.Index == ELFYAML::ELF_SHN(ELF::SHN_XINDEX)) {
+    return "Large indexes are not supported";
+  }
+  if (Symbol.Index && *Symbol.Index < ELFYAML::ELF_SHN(ELF::SHN_LORESERVE)) {
+    return "Use a section name to define which section a symbol is defined in";
+  }
+  return StringRef();
 }
 
 void MappingTraits<ELFYAML::LocalGlobalWeakSymbols>::mapping(
@@ -718,6 +790,11 @@ static void groupSectionMapping(IO &IO, ELFYAML::Group &group) {
 void MappingTraits<ELFYAML::SectionOrType>::mapping(
     IO &IO, ELFYAML::SectionOrType &sectionOrType) {
   IO.mapRequired("SectionOrType", sectionOrType.sectionNameOrType);
+}
+
+void MappingTraits<ELFYAML::SectionName>::mapping(
+    IO &IO, ELFYAML::SectionName &sectionName) {
+  IO.mapRequired("Section", sectionName.Section);
 }
 
 static void sectionMapping(IO &IO, ELFYAML::MipsABIFlags &Section) {
@@ -816,7 +893,7 @@ void MappingTraits<ELFYAML::Relocation>::mapping(IO &IO,
   assert(Object && "The IO context is not initialized");
 
   IO.mapRequired("Offset", Rel.Offset);
-  IO.mapRequired("Symbol", Rel.Symbol);
+  IO.mapOptional("Symbol", Rel.Symbol);
 
   if (Object->Header.Machine == ELFYAML::ELF_EM(ELF::EM_MIPS) &&
       Object->Header.Class == ELFYAML::ELF_ELFCLASS(ELF::ELFCLASS64)) {
@@ -837,6 +914,7 @@ void MappingTraits<ELFYAML::Object>::mapping(IO &IO, ELFYAML::Object &Object) {
   IO.setContext(&Object);
   IO.mapTag("!ELF", true);
   IO.mapRequired("FileHeader", Object.Header);
+  IO.mapOptional("ProgramHeaders", Object.ProgramHeaders);
   IO.mapOptional("Sections", Object.Sections);
   IO.mapOptional("Symbols", Object.Symbols);
   IO.setContext(nullptr);

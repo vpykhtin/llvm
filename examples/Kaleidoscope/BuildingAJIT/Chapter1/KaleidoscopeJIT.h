@@ -75,8 +75,8 @@ public:
 
     // Add the set to the JIT with the resolver we created above and a newly
     // created SectionMemoryManager.
-    return CompileLayer.addModule(std::move(M),
-                                  std::move(Resolver));
+    return cantFail(CompileLayer.addModule(std::move(M),
+                                           std::move(Resolver)));
   }
 
   JITSymbol findSymbol(const std::string Name) {
@@ -86,8 +86,12 @@ public:
     return CompileLayer.findSymbol(MangledNameStream.str(), true);
   }
 
+  JITTargetAddress getSymbolAddress(const std::string Name) {
+    return cantFail(findSymbol(Name).getAddress());
+  }
+
   void removeModule(ModuleHandle H) {
-    CompileLayer.removeModule(H);
+    cantFail(CompileLayer.removeModule(H));
   }
 };
 

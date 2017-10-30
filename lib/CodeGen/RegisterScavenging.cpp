@@ -16,18 +16,20 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/RegisterScavenging.h"
-
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/CodeGen/LiveRegUnits.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
-#include "llvm/PassSupport.h"
+#include "llvm/Pass.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -40,6 +42,7 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <utility>
 
 using namespace llvm;
 
@@ -375,7 +378,8 @@ unsigned RegScavenger::findSurvivorReg(MachineBasicBlock::iterator StartMI,
 static std::pair<MCPhysReg, MachineBasicBlock::iterator>
 findSurvivorBackwards(const MachineRegisterInfo &MRI,
     MachineBasicBlock::iterator From, MachineBasicBlock::iterator To,
-    const LiveRegUnits &LiveOut, ArrayRef<MCPhysReg> AllocationOrder) {
+    const LiveRegUnits &LiveOut, ArrayRef<MCPhysReg> AllocationOrder,
+    bool RestoreAfter) {
   bool FoundTo = false;
   MCPhysReg Survivor = 0;
   MachineBasicBlock::iterator Pos;
@@ -388,7 +392,7 @@ findSurvivorBackwards(const MachineRegisterInfo &MRI,
   for (MachineBasicBlock::iterator I = From;; --I) {
     const MachineInstr &MI = *I;
 
-    Used.accumulateBackward(MI);
+    Used.accumulate(MI);
 
     if (I == To) {
       // See if one of the registers in RC wasn't used so far.
@@ -401,6 +405,11 @@ findSurvivorBackwards(const MachineRegisterInfo &MRI,
       // the register which is not defined/used for the longest time.
       FoundTo = true;
       Pos = To;
+      // Note: It was fine so far to start our search at From, however now that
+      // we have to spill, and can only place the restore after From then
+      // add the regs used/defed by std::next(From) to the set.
+      if (RestoreAfter)
+        Used.accumulate(*std::next(From));
     }
     if (FoundTo) {
       if (Survivor == 0 || !Used.available(Survivor)) {
@@ -575,7 +584,8 @@ unsigned RegScavenger::scavengeRegisterBackwards(const TargetRegisterClass &RC,
   MachineBasicBlock::iterator UseMI;
   ArrayRef<MCPhysReg> AllocationOrder = RC.getRawAllocationOrder(MF);
   std::pair<MCPhysReg, MachineBasicBlock::iterator> P =
-      findSurvivorBackwards(*MRI, MBBI, To, LiveUnits, AllocationOrder);
+      findSurvivorBackwards(*MRI, MBBI, To, LiveUnits, AllocationOrder,
+                            RestoreAfter);
   MCPhysReg Reg = P.first;
   MachineBasicBlock::iterator SpillBefore = P.second;
   assert(Reg != 0 && "No register left to scavenge!");
@@ -762,13 +772,16 @@ void llvm::scavengeFrameVirtualRegs(MachineFunction &MF, RegScavenger &RS) {
 }
 
 namespace {
+
 /// This class runs register scavenging independ of the PrologEpilogInserter.
 /// This is used in for testing.
 class ScavengerTest : public MachineFunctionPass {
 public:
   static char ID;
+
   ScavengerTest() : MachineFunctionPass(ID) {}
-  bool runOnMachineFunction(MachineFunction &MF) {
+
+  bool runOnMachineFunction(MachineFunction &MF) override {
     const TargetSubtargetInfo &STI = MF.getSubtarget();
     const TargetFrameLowering &TFL = *STI.getFrameLowering();
 
@@ -785,9 +798,10 @@ public:
     return true;
   }
 };
-char ScavengerTest::ID;
 
 } // end anonymous namespace
+
+char ScavengerTest::ID;
 
 INITIALIZE_PASS(ScavengerTest, "scavenger-test",
                 "Scavenge virtual registers inside basic blocks", false, false)

@@ -156,6 +156,7 @@ Error Builder::addSymbol(const ModuleSymbolTable &Msymtab,
     Unc = &Uncommons.back();
     *Unc = {};
     setStr(Unc->COFFWeakExternFallbackName, "");
+    setStr(Unc->SectionName, "");
     return *Unc;
   };
 
@@ -230,15 +231,21 @@ Error Builder::addSymbol(const ModuleSymbolTable &Msymtab,
 
     if ((Flags & object::BasicSymbolRef::SF_Weak) &&
         (Flags & object::BasicSymbolRef::SF_Indirect)) {
+      auto *Fallback = dyn_cast<GlobalValue>(
+          cast<GlobalAlias>(GV)->getAliasee()->stripPointerCasts());
+      if (!Fallback)
+        return make_error<StringError>("Invalid weak external",
+                                       inconvertibleErrorCode());
       std::string FallbackName;
       raw_string_ostream OS(FallbackName);
-      Msymtab.printSymbolName(
-          OS, cast<GlobalValue>(
-                  cast<GlobalAlias>(GV)->getAliasee()->stripPointerCasts()));
+      Msymtab.printSymbolName(OS, Fallback);
       OS.flush();
       setStr(Uncommon().COFFWeakExternFallbackName, Saver.save(FallbackName));
     }
   }
+
+  if (!Base->getSection().empty())
+    setStr(Uncommon().SectionName, Saver.save(Base->getSection()));
 
   return Error::success();
 }

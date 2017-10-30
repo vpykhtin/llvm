@@ -24,7 +24,6 @@
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/TargetRegistry.h"
 
 using namespace llvm;
 using namespace llvm::object;
@@ -123,7 +122,8 @@ void DyldELFObject<ELFT>::updateSymbolAddress(const SymbolRef &SymRef,
 }
 
 class LoadedELFObjectInfo final
-    : public RuntimeDyld::LoadedObjectInfoHelper<LoadedELFObjectInfo> {
+    : public LoadedObjectInfoHelper<LoadedELFObjectInfo,
+                                    RuntimeDyld::LoadedObjectInfo> {
 public:
   LoadedELFObjectInfo(RuntimeDyldImpl &RTDyld, ObjSectionToIDMap ObjSecToIDMap)
       : LoadedObjectInfoHelper(RTDyld, std::move(ObjSecToIDMap)) {}
@@ -354,6 +354,18 @@ void RuntimeDyldELF::resolveAArch64Relocation(const SectionEntry &Section,
   default:
     llvm_unreachable("Relocation type not implemented yet!");
     break;
+  case ELF::R_AARCH64_ABS16: {
+    uint64_t Result = Value + Addend;
+    assert(static_cast<int64_t>(Result) >= INT16_MIN && Result < UINT16_MAX);
+    write(isBE, TargetPtr, static_cast<uint16_t>(Result & 0xffffU));
+    break;
+  }
+  case ELF::R_AARCH64_ABS32: {
+    uint64_t Result = Value + Addend;
+    assert(static_cast<int64_t>(Result) >= INT32_MIN && Result < UINT32_MAX);
+    write(isBE, TargetPtr, static_cast<uint32_t>(Result & 0xffffffffU));
+    break;
+  }
   case ELF::R_AARCH64_ABS64:
     write(isBE, TargetPtr, Value + Addend);
     break;

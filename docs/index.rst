@@ -159,7 +159,7 @@ representation.
   misunderstood instruction.
 
 :doc:`Frontend/PerformanceTips`
-   A collection of tips for frontend authors on how to generate IR 
+   A collection of tips for frontend authors on how to generate IR
    which LLVM is able to effectively optimize.
 
 :doc:`Docker`
@@ -216,7 +216,6 @@ For developers of applications which use LLVM as a library.
 
 `Doxygen generated documentation <http://llvm.org/doxygen/>`_
   (`classes <http://llvm.org/doxygen/inherits.html>`_)
-  (`tarball <http://llvm.org/doxygen/doxygen.tar.gz>`_)
 
 `Documentation for Go bindings <http://godoc.org/llvm.org/llvm/bindings/go/llvm>`_
 
@@ -280,7 +279,9 @@ For API clients and LLVM developers.
    GlobalISel
    XRay
    XRayExample
+   XRayFDRFormat
    PDB/index
+   CFIVerify
 
 :doc:`WritingAnLLVMPass`
    Information on how to write LLVM transformations and analyses.
@@ -410,6 +411,9 @@ For API clients and LLVM developers.
 
 :doc:`The Microsoft PDB File Format <PDB/index>`
   A detailed description of the Microsoft PDB (Program Database) file format.
+
+:doc:`CFIVerify`
+  A description of the verification tool for Control Flow Integrity.
 
 Development Process Documentation
 =================================
