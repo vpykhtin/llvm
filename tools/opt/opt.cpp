@@ -405,6 +405,7 @@ int main(int argc, char **argv) {
   initializeCountingFunctionInserterPass(Registry);
   initializeUnreachableBlockElimLegacyPassPass(Registry);
   initializeExpandReductionsPass(Registry);
+  initializeWriteBitcodePassPass(Registry);
 
 #ifdef LINK_POLLY_INTO_TOOLS
   polly::initializePollyPasses(Registry);
@@ -444,7 +445,8 @@ int main(int argc, char **argv) {
   }
 
   // Load the input module...
-  std::unique_ptr<Module> M = parseIRFile(InputFilename, Err, Context);
+  std::unique_ptr<Module> M =
+      parseIRFile(InputFilename, Err, Context, !NoVerify);
 
   if (!M) {
     Err.print(argv[0], errs());

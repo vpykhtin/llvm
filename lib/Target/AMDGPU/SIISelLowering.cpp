@@ -469,6 +469,7 @@ SITargetLowering::SITargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::EXTRACT_VECTOR_ELT, MVT::v2i16, Custom);
     setOperationAction(ISD::EXTRACT_VECTOR_ELT, MVT::v2f16, Custom);
 
+    setOperationAction(ISD::ANY_EXTEND, MVT::v2i32, Expand);
     setOperationAction(ISD::ZERO_EXTEND, MVT::v2i32, Expand);
     setOperationAction(ISD::SIGN_EXTEND, MVT::v2i32, Expand);
     setOperationAction(ISD::FP_EXTEND, MVT::v2f32, Expand);
@@ -1493,14 +1494,31 @@ SDValue SITargetLowering::LowerFormalArguments(
     // - At least one of PERSP_* (0xF) or LINEAR_* (0x70) must be enabled.
     // - If POS_W_FLOAT (11) is enabled, at least one of PERSP_* must be
     //   enabled too.
-    if (CallConv == CallingConv::AMDGPU_PS &&
-        ((Info->getPSInputAddr() & 0x7F) == 0 ||
-         ((Info->getPSInputAddr() & 0xF) == 0 &&
-          Info->isPSInputAllocated(11)))) {
-      CCInfo.AllocateReg(AMDGPU::VGPR0);
-      CCInfo.AllocateReg(AMDGPU::VGPR1);
-      Info->markPSInputAllocated(0);
-      Info->markPSInputEnabled(0);
+    if (CallConv == CallingConv::AMDGPU_PS) {
+      if ((Info->getPSInputAddr() & 0x7F) == 0 ||
+           ((Info->getPSInputAddr() & 0xF) == 0 &&
+            Info->isPSInputAllocated(11))) {
+        CCInfo.AllocateReg(AMDGPU::VGPR0);
+        CCInfo.AllocateReg(AMDGPU::VGPR1);
+        Info->markPSInputAllocated(0);
+        Info->markPSInputEnabled(0);
+      }
+      if (Subtarget->isAmdPalOS()) {
+        // For isAmdPalOS, the user does not enable some bits after compilation
+        // based on run-time states; the register values being generated here are
+        // the final ones set in hardware. Therefore we need to apply the
+        // workaround to PSInputAddr and PSInputEnable together.  (The case where
+        // a bit is set in PSInputAddr but not PSInputEnable is where the
+        // frontend set up an input arg for a particular interpolation mode, but
+        // nothing uses that input arg. Really we should have an earlier pass
+        // that removes such an arg.)
+        unsigned PsInputBits = Info->getPSInputAddr() & Info->getPSInputEnable();
+        if ((PsInputBits & 0x7F) == 0 ||
+            ((PsInputBits & 0xF) == 0 &&
+             (PsInputBits >> 11 & 1)))
+          Info->markPSInputEnabled(
+              countTrailingZeros(Info->getPSInputAddr(), ZB_Undefined));
+      }
     }
 
     assert(!Info->hasDispatchPtr() &&
@@ -2432,7 +2450,7 @@ MachineBasicBlock *SITargetLowering::splitKillBlock(MachineInstr &MI,
 
   if (SplitPoint == BB->end()) {
     // Don't bother with a new block.
-    MI.setDesc(TII->get(AMDGPU::SI_KILL_TERMINATOR));
+    MI.setDesc(TII->getKillTerminatorFromPseudo(MI.getOpcode()));
     return BB;
   }
 
@@ -2446,7 +2464,7 @@ MachineBasicBlock *SITargetLowering::splitKillBlock(MachineInstr &MI,
   SplitBB->transferSuccessorsAndUpdatePHIs(BB);
   BB->addSuccessor(SplitBB);
 
-  MI.setDesc(TII->get(AMDGPU::SI_KILL_TERMINATOR));
+  MI.setDesc(TII->getKillTerminatorFromPseudo(MI.getOpcode()));
   return SplitBB;
 }
 
@@ -3000,7 +3018,8 @@ MachineBasicBlock *SITargetLowering::EmitInstrWithCustomInserter(
   case AMDGPU::SI_INDIRECT_DST_V8:
   case AMDGPU::SI_INDIRECT_DST_V16:
     return emitIndirectDst(MI, *BB, *getSubtarget());
-  case AMDGPU::SI_KILL:
+  case AMDGPU::SI_KILL_F32_COND_IMM_PSEUDO:
+  case AMDGPU::SI_KILL_I1_PSEUDO:
     return splitKillBlock(MI, BB);
   case AMDGPU::V_CNDMASK_B64_PSEUDO: {
     MachineRegisterInfo &MRI = BB->getParent()->getRegInfo();
@@ -3013,15 +3032,18 @@ MachineBasicBlock *SITargetLowering::EmitInstrWithCustomInserter(
 
     unsigned DstLo = MRI.createVirtualRegister(&AMDGPU::VGPR_32RegClass);
     unsigned DstHi = MRI.createVirtualRegister(&AMDGPU::VGPR_32RegClass);
+    unsigned SrcCondCopy = MRI.createVirtualRegister(&AMDGPU::SReg_64_XEXECRegClass);
 
+    BuildMI(*BB, MI, DL, TII->get(AMDGPU::COPY), SrcCondCopy)
+      .addReg(SrcCond);
     BuildMI(*BB, MI, DL, TII->get(AMDGPU::V_CNDMASK_B32_e64), DstLo)
       .addReg(Src0, 0, AMDGPU::sub0)
       .addReg(Src1, 0, AMDGPU::sub0)
-      .addReg(SrcCond);
+      .addReg(SrcCondCopy);
     BuildMI(*BB, MI, DL, TII->get(AMDGPU::V_CNDMASK_B32_e64), DstHi)
       .addReg(Src0, 0, AMDGPU::sub1)
       .addReg(Src1, 0, AMDGPU::sub1)
-      .addReg(SrcCond);
+      .addReg(SrcCondCopy);
 
     BuildMI(*BB, MI, DL, TII->get(AMDGPU::REG_SEQUENCE), Dst)
       .addReg(DstLo)
@@ -3085,6 +3107,10 @@ MachineBasicBlock *SITargetLowering::EmitInstrWithCustomInserter(
   default:
     return AMDGPUTargetLowering::EmitInstrWithCustomInserter(MI, BB);
   }
+}
+
+bool SITargetLowering::hasBitPreservingFPLogic(EVT VT) const {
+  return isTypeLegal(VT.getScalarType());
 }
 
 bool SITargetLowering::enableAggressiveFMAFusion(EVT VT) const {
@@ -6483,8 +6509,7 @@ SDNode *SITargetLowering::legalizeTargetIndependentNode(SDNode *Node,
                                      Node->getOperand(i)), 0));
   }
 
-  DAG.UpdateNodeOperands(Node, Ops);
-  return Node;
+  return DAG.UpdateNodeOperands(Node, Ops);
 }
 
 /// \brief Fold the instructions after selecting them.

@@ -48,7 +48,6 @@
 #include <cstdint>
 #include <map>
 #include <string>
-#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -67,17 +66,6 @@ DWARFContext::DWARFContext(std::unique_ptr<const DWARFObject> DObj,
     : DIContext(CK_DWARF), DWPName(std::move(DWPName)), DObj(std::move(DObj)) {}
 
 DWARFContext::~DWARFContext() = default;
-
-static void dumpAccelSection(raw_ostream &OS, const DWARFObject &Obj,
-                             const DWARFSection &Section,
-                             StringRef StringSection, bool LittleEndian) {
-  DWARFDataExtractor AccelSection(Obj, Section, LittleEndian, 0);
-  DataExtractor StrData(StringSection, LittleEndian, 0);
-  DWARFAcceleratorTable Accel(AccelSection, StrData);
-  if (!Accel.extract())
-    return;
-  Accel.dump(OS);
-}
 
 /// Dump the UUID load command.
 static void dumpUUID(raw_ostream &OS, const ObjectFile &Obj) {
@@ -453,23 +441,19 @@ void DWARFContext::dump(
 
   if (shouldDump(Explicit, ".apple_names", DIDT_ID_AppleNames,
                  DObj->getAppleNamesSection().Data))
-    dumpAccelSection(OS, *DObj, DObj->getAppleNamesSection(),
-                     DObj->getStringSection(), isLittleEndian());
+    getAppleNames().dump(OS);
 
   if (shouldDump(Explicit, ".apple_types", DIDT_ID_AppleTypes,
                  DObj->getAppleTypesSection().Data))
-    dumpAccelSection(OS, *DObj, DObj->getAppleTypesSection(),
-                     DObj->getStringSection(), isLittleEndian());
+    getAppleTypes().dump(OS);
 
   if (shouldDump(Explicit, ".apple_namespaces", DIDT_ID_AppleNamespaces,
                  DObj->getAppleNamespacesSection().Data))
-    dumpAccelSection(OS, *DObj, DObj->getAppleNamespacesSection(),
-                     DObj->getStringSection(), isLittleEndian());
+    getAppleNamespaces().dump(OS);
 
   if (shouldDump(Explicit, ".apple_objc", DIDT_ID_AppleObjC,
                  DObj->getAppleObjCSection().Data))
-    dumpAccelSection(OS, *DObj, DObj->getAppleObjCSection(),
-                     DObj->getStringSection(), isLittleEndian());
+    getAppleObjC().dump(OS);
 }
 
 DWARFCompileUnit *DWARFContext::getDWOCompileUnitForHash(uint64_t Hash) {
@@ -638,6 +622,40 @@ const DWARFDebugMacro *DWARFContext::getDebugMacro() {
   return Macro.get();
 }
 
+static DWARFAcceleratorTable &
+getAccelTable(std::unique_ptr<DWARFAcceleratorTable> &Cache,
+              const DWARFObject &Obj, const DWARFSection &Section,
+              StringRef StringSection, bool IsLittleEndian) {
+  if (Cache)
+    return *Cache;
+  DWARFDataExtractor AccelSection(Obj, Section, IsLittleEndian, 0);
+  DataExtractor StrData(StringSection, IsLittleEndian, 0);
+  Cache.reset(new DWARFAcceleratorTable(AccelSection, StrData));
+  Cache->extract();
+  return *Cache;
+}
+
+const DWARFAcceleratorTable &DWARFContext::getAppleNames() {
+  return getAccelTable(AppleNames, *DObj, DObj->getAppleNamesSection(),
+                       DObj->getStringSection(), isLittleEndian());
+}
+
+const DWARFAcceleratorTable &DWARFContext::getAppleTypes() {
+  return getAccelTable(AppleTypes, *DObj, DObj->getAppleTypesSection(),
+                       DObj->getStringSection(), isLittleEndian());
+}
+
+const DWARFAcceleratorTable &DWARFContext::getAppleNamespaces() {
+  return getAccelTable(AppleNamespaces, *DObj,
+                       DObj->getAppleNamespacesSection(),
+                       DObj->getStringSection(), isLittleEndian());
+}
+
+const DWARFAcceleratorTable &DWARFContext::getAppleObjC() {
+  return getAccelTable(AppleObjC, *DObj, DObj->getAppleObjCSection(),
+                       DObj->getStringSection(), isLittleEndian());
+}
+
 const DWARFLineTable *
 DWARFContext::getLineTableForUnit(DWARFUnit *U) {
   if (!Line)
@@ -702,6 +720,35 @@ DWARFCompileUnit *DWARFContext::getCompileUnitForAddress(uint64_t Address) {
   uint32_t CUOffset = getDebugAranges()->findAddress(Address);
   // Retrieve the compile unit.
   return getCompileUnitForOffset(CUOffset);
+}
+
+DWARFContext::DIEsForAddress DWARFContext::getDIEsForAddress(uint64_t Address) {
+  DIEsForAddress Result;
+
+  DWARFCompileUnit *CU = getCompileUnitForAddress(Address);
+  if (!CU)
+    return Result;
+
+  Result.CompileUnit = CU;
+  Result.FunctionDIE = CU->getSubroutineForAddress(Address);
+
+  std::vector<DWARFDie> Worklist;
+  Worklist.push_back(Result.FunctionDIE);
+  while (!Worklist.empty()) {
+    DWARFDie DIE = Worklist.back();
+    Worklist.pop_back();
+
+    if (DIE.getTag() == DW_TAG_lexical_block &&
+        DIE.addressRangeContainsAddress(Address)) {
+      Result.BlockDIE = DIE;
+      break;
+    }
+
+    for (auto Child : DIE)
+      Worklist.push_back(Child);
+  }
+
+  return Result;
 }
 
 static bool getFunctionNameAndStartLineForAddress(DWARFCompileUnit *CU,

@@ -27,6 +27,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Regex.h"
 #include <cstring>
@@ -2358,15 +2359,26 @@ Value *llvm::UpgradeBitCastExpr(unsigned Opc, Constant *C, Type *DestTy) {
 /// info. Return true if module is modified.
 bool llvm::UpgradeDebugInfo(Module &M) {
   unsigned Version = getDebugMetadataVersionFromModule(M);
-  if (Version == DEBUG_METADATA_VERSION)
-    return false;
-
-  bool RetCode = StripDebugInfo(M);
-  if (RetCode) {
+  if (Version == DEBUG_METADATA_VERSION) {
+    bool BrokenDebugInfo = false;
+    if (verifyModule(M, &llvm::errs(), &BrokenDebugInfo))
+      report_fatal_error("Broken module found, compilation aborted!");
+    if (!BrokenDebugInfo)
+      // Everything is ok.
+      return false;
+    else {
+      // Diagnose malformed debug info.
+      DiagnosticInfoIgnoringInvalidDebugMetadata Diag(M);
+      M.getContext().diagnose(Diag);
+    }
+  }
+  bool Modified = StripDebugInfo(M);
+  if (Modified && Version != DEBUG_METADATA_VERSION) {
+    // Diagnose a version mismatch.
     DiagnosticInfoDebugMetadataVersion DiagVersion(M, Version);
     M.getContext().diagnose(DiagVersion);
   }
-  return RetCode;
+  return Modified;
 }
 
 bool llvm::UpgradeModuleFlags(Module &M) {
@@ -2434,6 +2446,35 @@ bool llvm::UpgradeModuleFlags(Module &M) {
   }
 
   return Changed;
+}
+
+void llvm::UpgradeSectionAttributes(Module &M) {
+  auto TrimSpaces = [](StringRef Section) -> std::string {
+    SmallVector<StringRef, 5> Components;
+    Section.split(Components, ',');
+
+    SmallString<32> Buffer;
+    raw_svector_ostream OS(Buffer);
+
+    for (auto Component : Components)
+      OS << ',' << Component.trim();
+
+    return OS.str().substr(1);
+  };
+
+  for (auto &GV : M.globals()) {
+    if (!GV.hasSection())
+      continue;
+
+    StringRef Section = GV.getSection();
+
+    if (!Section.startswith("__DATA, __objc_catlist"))
+      continue;
+
+    // __DATA, __objc_catlist, regular, no_dead_strip
+    // __DATA,__objc_catlist,regular,no_dead_strip
+    GV.setSection(TrimSpaces(Section));
+  }
 }
 
 static bool isOldLoopArgument(Metadata *MD) {

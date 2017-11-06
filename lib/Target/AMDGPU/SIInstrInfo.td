@@ -232,16 +232,6 @@ def si_setcc_uniform : PatFrag <
   return true;
 }]>;
 
-def si_uniform_br : PatFrag <
-  (ops node:$cond, node:$bb), (brcond node:$cond, node:$bb), [{
-  return isUniformBr(N);
-}]>;
-
-def si_uniform_br_scc : PatFrag <
-  (ops node:$cond, node:$bb), (si_uniform_br node:$cond, node:$bb), [{
-  return isCBranchSCC(N);
-}]>;
-
 def lshr_rev : PatFrag <
   (ops node:$src1, node:$src0),
   (srl $src0, $src1)
@@ -264,27 +254,28 @@ multiclass SIAtomicM0Glue2 <string op_name, bit is_amdgpu = 0> {
     [SDNPHasChain, SDNPMayStore, SDNPMayLoad, SDNPMemOperand, SDNPInGlue]
   >;
 
-  def _local : local_binary_atomic_op <!cast<SDNode>(NAME#"_glue")>;
+  def _local_m0 : local_binary_atomic_op <!cast<SDNode>(NAME#"_glue")>;
 }
 
-defm si_atomic_load_add : SIAtomicM0Glue2 <"LOAD_ADD">;
-defm si_atomic_load_sub : SIAtomicM0Glue2 <"LOAD_SUB">;
-defm si_atomic_inc : SIAtomicM0Glue2 <"INC", 1>;
-defm si_atomic_dec : SIAtomicM0Glue2 <"DEC", 1>;
-defm si_atomic_load_and : SIAtomicM0Glue2 <"LOAD_AND">;
-defm si_atomic_load_min : SIAtomicM0Glue2 <"LOAD_MIN">;
-defm si_atomic_load_max : SIAtomicM0Glue2 <"LOAD_MAX">;
-defm si_atomic_load_or : SIAtomicM0Glue2 <"LOAD_OR">;
-defm si_atomic_load_xor : SIAtomicM0Glue2 <"LOAD_XOR">;
-defm si_atomic_load_umin : SIAtomicM0Glue2 <"LOAD_UMIN">;
-defm si_atomic_load_umax : SIAtomicM0Glue2 <"LOAD_UMAX">;
-defm si_atomic_swap : SIAtomicM0Glue2 <"SWAP">;
+defm atomic_load_add : SIAtomicM0Glue2 <"LOAD_ADD">;
+defm atomic_load_sub : SIAtomicM0Glue2 <"LOAD_SUB">;
+defm atomic_inc : SIAtomicM0Glue2 <"INC", 1>;
+defm atomic_dec : SIAtomicM0Glue2 <"DEC", 1>;
+defm atomic_load_and : SIAtomicM0Glue2 <"LOAD_AND">;
+defm atomic_load_min : SIAtomicM0Glue2 <"LOAD_MIN">;
+defm atomic_load_max : SIAtomicM0Glue2 <"LOAD_MAX">;
+defm atomic_load_or : SIAtomicM0Glue2 <"LOAD_OR">;
+defm atomic_load_xor : SIAtomicM0Glue2 <"LOAD_XOR">;
+defm atomic_load_umin : SIAtomicM0Glue2 <"LOAD_UMIN">;
+defm atomic_load_umax : SIAtomicM0Glue2 <"LOAD_UMAX">;
+defm atomic_swap : SIAtomicM0Glue2 <"SWAP">;
 
-def si_atomic_cmp_swap_glue : SDNode <"ISD::ATOMIC_CMP_SWAP", SDTAtomic3,
+def atomic_cmp_swap_glue : SDNode <"ISD::ATOMIC_CMP_SWAP", SDTAtomic3,
   [SDNPHasChain, SDNPMayStore, SDNPMayLoad, SDNPMemOperand, SDNPInGlue]
 >;
 
-defm si_atomic_cmp_swap : AtomicCmpSwapLocal <si_atomic_cmp_swap_glue>;
+def atomic_cmp_swap_local_m0 : AtomicCmpSwapLocal<atomic_cmp_swap_glue>;
+
 
 def as_i1imm : SDNodeXForm<imm, [{
   return CurDAG->getTargetConstant(N->getZExtValue(), SDLoc(N), MVT::i1);
@@ -304,6 +295,10 @@ def as_i32imm: SDNodeXForm<imm, [{
 
 def as_i64imm: SDNodeXForm<imm, [{
   return CurDAG->getTargetConstant(N->getSExtValue(), SDLoc(N), MVT::i64);
+}]>;
+
+def cond_as_i32imm: SDNodeXForm<cond, [{
+  return CurDAG->getTargetConstant(N->get(), SDLoc(N), MVT::i32);
 }]>;
 
 // Copied from the AArch64 backend:
@@ -994,7 +989,7 @@ class getVOP3SrcForVT<ValueType VT> {
            VCSrc_f64,
            VCSrc_b64),
         !if(!eq(VT.Value, i1.Value),
-           SCSrc_b64,
+           SCSrc_i1,
            !if(isFP,
               !if(!eq(VT.Value, f16.Value),
                  VCSrc_f16,
