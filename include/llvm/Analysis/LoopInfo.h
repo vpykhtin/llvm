@@ -76,7 +76,7 @@ template <class BlockT, class LoopT> class LoopBase {
 
   SmallPtrSet<const BlockT *, 8> DenseBlockSet;
 
-#if !defined(NDEBUG) || !LLVM_ENABLE_ABI_BREAKING_CHECKS
+#if LLVM_ENABLE_ABI_BREAKING_CHECKS
   /// Indicator that this loop is no longer a valid loop.
   bool IsInvalid = false;
 #endif
@@ -165,15 +165,19 @@ public:
     return Blocks.size();
   }
 
-#ifndef NDEBUG
   /// Return true if this loop is no longer valid.  The only valid use of this
   /// helper is "assert(L.isInvalid())" or equivalent, since IsInvalid is set to
-  /// false by the destructor.  In other words, if this accessor returns false,
+  /// true by the destructor.  In other words, if this accessor returns true,
   /// the caller has already triggered UB by calling this accessor; and so it
-  /// can only be called in a context where a return value of false indicates a
+  /// can only be called in a context where a return value of true indicates a
   /// programmer error.
-  bool isInvalid() const { return IsInvalid; }
+  bool isInvalid() const {
+#if LLVM_ENABLE_ABI_BREAKING_CHECKS
+    return IsInvalid;
+#else
+    return false;
 #endif
+  }
 
   /// True if terminator in the block can branch to another block that is
   /// outside of the current loop.
@@ -392,7 +396,9 @@ protected:
     for (auto *SubLoop : SubLoops)
       SubLoop->~LoopT();
 
+#if LLVM_ENABLE_ABI_BREAKING_CHECKS
     IsInvalid = true;
+#endif
     SubLoops.clear();
     Blocks.clear();
     DenseBlockSet.clear();
@@ -513,6 +519,14 @@ public:
   /// The LoopID metadata node should have one or more operands and the first
   /// operand should be the node itself.
   void setLoopID(MDNode *LoopID) const;
+
+  /// Add llvm.loop.unroll.disable to this loop's loop id metadata.
+  ///
+  /// Remove existing unroll metadata and add unroll disable metadata to
+  /// indicate the loop has already been unrolled.  This prevents a loop
+  /// from being unrolled more than is directed by a pragma if the loop
+  /// unrolling pass is run more than once (which it generally is).
+  void setLoopAlreadyUnrolled();
 
   /// Return true if no exit block for the loop has a predecessor that is
   /// outside the loop.

@@ -818,6 +818,7 @@ public:
   unsigned isStoreToStackSlot(const MachineInstr &MI,
                               int &FrameIndex) const override;
 
+  unsigned getInstBundleSize(const MachineInstr &MI) const;
   unsigned getInstSizeInBytes(const MachineInstr &MI) const override;
 
   bool mayAccessFlatAddressSpace(const MachineInstr &MI) const;
@@ -856,6 +857,9 @@ public:
                                     MachineBasicBlock::iterator I,
                                     const DebugLoc &DL,
                                     unsigned DestReg) const;
+
+  static bool isKillTerminator(unsigned Opcode);
+  const MCInstrDesc &getKillTerminatorFromPseudo(unsigned Opcode) const;
 };
 
 namespace AMDGPU {

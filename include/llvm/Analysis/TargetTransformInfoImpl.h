@@ -188,6 +188,8 @@ public:
   }
 
   bool isLoweredToCall(const Function *F) {
+    assert(F && "A concrete function must be provided to this routine.");
+
     // FIXME: These should almost certainly not be handled here, and instead
     // handled with the help of TLI or the target itself. This was largely
     // ported from existing analysis heuristics here so that such refactorings
@@ -252,6 +254,8 @@ public:
   bool isLegalMaskedGather(Type *DataType) { return false; }
 
   bool hasDivRemOp(Type *DataType, bool IsSigned) { return false; }
+
+  bool hasVolatileVariant(Instruction *I, unsigned AddrSpace) { return false; }
 
   bool prefersVectorizedAddressing() { return true; }
 
@@ -718,10 +722,10 @@ public:
     // Assumes the address space is 0 when Ptr is nullptr.
     unsigned AS =
         (Ptr == nullptr ? 0 : Ptr->getType()->getPointerAddressSpace());
+
     if (static_cast<T *>(this)->isLegalAddressingMode(
             TargetType, const_cast<GlobalValue *>(BaseGV),
-            static_cast<int64_t>(BaseOffset.getLimitedValue()), HasBaseReg,
-            Scale, AS))
+            BaseOffset.sextOrTrunc(64).getSExtValue(), HasBaseReg, Scale, AS))
       return TTI::TCC_Free;
     return TTI::TCC_Basic;
   }
@@ -798,7 +802,7 @@ public:
     // A real function call is much slower.
     if (auto *CI = dyn_cast<CallInst>(I)) {
       const Function *F = CI->getCalledFunction();
-      if (static_cast<T *>(this)->isLoweredToCall(F))
+      if (!F || static_cast<T *>(this)->isLoweredToCall(F))
         return 40;
       // Some intrinsics return a value and a flag, we use the value type
       // to decide its latency.

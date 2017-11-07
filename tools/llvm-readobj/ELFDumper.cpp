@@ -34,6 +34,7 @@
 #include "llvm/Object/Error.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Object/StackMapParser.h"
+#include "llvm/Support/AMDGPUMetadata.h"
 #include "llvm/Support/ARMAttributeParser.h"
 #include "llvm/Support/ARMBuildAttributes.h"
 #include "llvm/Support/Casting.h"
@@ -155,8 +156,6 @@ public:
   void printMipsABIFlags() override;
   void printMipsReginfo() override;
   void printMipsOptions() override;
-
-  void printAMDGPUCodeObjectMetadata() override;
 
   void printStackMap() const override;
 
@@ -821,10 +820,22 @@ static const EnumEntry<unsigned> ElfOSABI[] = {
   {"AROS",         "AROS",                 ELF::ELFOSABI_AROS},
   {"FenixOS",      "FenixOS",              ELF::ELFOSABI_FENIXOS},
   {"CloudABI",     "CloudABI",             ELF::ELFOSABI_CLOUDABI},
-  {"C6000_ELFABI", "Bare-metal C6000",     ELF::ELFOSABI_C6000_ELFABI},
-  {"C6000_LINUX",  "Linux C6000",          ELF::ELFOSABI_C6000_LINUX},
-  {"ARM",          "ARM",                  ELF::ELFOSABI_ARM},
   {"Standalone",   "Standalone App",       ELF::ELFOSABI_STANDALONE}
+};
+
+static const EnumEntry<unsigned> AMDGPUElfOSABI[] = {
+  {"AMDGPU_HSA",    "AMDGPU - HSA",    ELF::ELFOSABI_AMDGPU_HSA},
+  {"AMDGPU_PAL",    "AMDGPU - PAL",    ELF::ELFOSABI_AMDGPU_PAL},
+  {"AMDGPU_MESA3D", "AMDGPU - MESA3D", ELF::ELFOSABI_AMDGPU_MESA3D}
+};
+
+static const EnumEntry<unsigned> ARMElfOSABI[] = {
+  {"ARM", "ARM", ELF::ELFOSABI_ARM}
+};
+
+static const EnumEntry<unsigned> C6000ElfOSABI[] = {
+  {"C6000_ELFABI", "Bare-metal C6000", ELF::ELFOSABI_C6000_ELFABI},
+  {"C6000_LINUX",  "Linux C6000",      ELF::ELFOSABI_C6000_LINUX}
 };
 
 static const EnumEntry<unsigned> ElfMachineType[] = {
@@ -1232,6 +1243,20 @@ static const EnumEntry<unsigned> ElfHeaderMipsFlags[] = {
   LLVM_READOBJ_ENUM_ENT(ELF, EF_MIPS_ARCH_64R6)
 };
 
+static const EnumEntry<unsigned> ElfHeaderAMDGPUFlags[] = {
+  LLVM_READOBJ_ENUM_ENT(ELF, EF_AMDGPU_ARCH_NONE),
+  LLVM_READOBJ_ENUM_ENT(ELF, EF_AMDGPU_ARCH_R600),
+  LLVM_READOBJ_ENUM_ENT(ELF, EF_AMDGPU_ARCH_GCN)
+};
+
+static const EnumEntry<unsigned> ElfHeaderRISCVFlags[] = {
+  LLVM_READOBJ_ENUM_ENT(ELF, EF_RISCV_RVC),
+  LLVM_READOBJ_ENUM_ENT(ELF, EF_RISCV_FLOAT_ABI_SINGLE),
+  LLVM_READOBJ_ENUM_ENT(ELF, EF_RISCV_FLOAT_ABI_DOUBLE),
+  LLVM_READOBJ_ENUM_ENT(ELF, EF_RISCV_FLOAT_ABI_QUAD),
+  LLVM_READOBJ_ENUM_ENT(ELF, EF_RISCV_RVE)
+};
+
 static const EnumEntry<unsigned> ElfSymOtherFlags[] = {
   LLVM_READOBJ_ENUM_ENT(ELF, STV_INTERNAL),
   LLVM_READOBJ_ENUM_ENT(ELF, STV_HIDDEN),
@@ -1288,12 +1313,12 @@ ELFDumper<ELFT>::ELFDumper(const ELFFile<ELFT> *Obj, ScopedPrinter &Writer)
     switch (Sec.sh_type) {
     case ELF::SHT_SYMTAB:
       if (DotSymtabSec != nullptr)
-        reportError("Multilpe SHT_SYMTAB");
+        reportError("Multiple SHT_SYMTAB");
       DotSymtabSec = &Sec;
       break;
     case ELF::SHT_DYNSYM:
       if (DynSymRegion.Size)
-        reportError("Multilpe SHT_DYNSYM");
+        reportError("Multiple SHT_DYNSYM");
       DynSymRegion = createDRIFrom(&Sec);
       // This is only used (if Elf_Shdr present)for naming section in GNU style
       DynSymtabName = unwrapOrError(Obj->getSectionName(&Sec));
@@ -1313,7 +1338,7 @@ ELFDumper<ELFT>::ELFDumper(const ELFFile<ELFT> *Obj, ScopedPrinter &Writer)
       break;
     case ELF::SHT_GNU_verneed:
       if (dot_gnu_version_r_sec != nullptr)
-        reportError("Multilpe SHT_GNU_verneed");
+        reportError("Multiple SHT_GNU_verneed");
       dot_gnu_version_r_sec = &Sec;
       break;
     }
@@ -2327,36 +2352,6 @@ template <class ELFT> void ELFDumper<ELFT>::printMipsOptions() {
   }
 }
 
-template <class ELFT> void ELFDumper<ELFT>::printAMDGPUCodeObjectMetadata() {
-  const Elf_Shdr *Shdr = findSectionByName(*Obj, ".note");
-  if (!Shdr) {
-    W.startLine() << "There is no .note section in the file.\n";
-    return;
-  }
-  ArrayRef<uint8_t> Sec = unwrapOrError(Obj->getSectionContents(Shdr));
-
-  const uint32_t CodeObjectMetadataNoteType = 10;
-  for (auto I = reinterpret_cast<const Elf_Word *>(&Sec[0]),
-       E = I + Sec.size()/4; I != E;) {
-    uint32_t NameSZ = I[0];
-    uint32_t DescSZ = I[1];
-    uint32_t Type = I[2];
-    I += 3;
-
-    StringRef Name;
-    if (NameSZ) {
-      Name = StringRef(reinterpret_cast<const char *>(I), NameSZ - 1);
-      I += alignTo<4>(NameSZ)/4;
-    }
-
-    if (Name == "AMD" && Type == CodeObjectMetadataNoteType) {
-      StringRef Desc(reinterpret_cast<const char *>(I), DescSZ);
-      W.printString(Desc);
-    }
-    I += alignTo<4>(DescSZ)/4;
-  }
-}
-
 template <class ELFT> void ELFDumper<ELFT>::printStackMap() const {
   const Elf_Shdr *StackMapSection = nullptr;
   for (const auto &Sec : unwrapOrError(Obj->sections())) {
@@ -2370,7 +2365,6 @@ template <class ELFT> void ELFDumper<ELFT>::printStackMap() const {
   if (!StackMapSection)
     return;
 
-  StringRef StackMapContents;
   ArrayRef<uint8_t> StackMapContentsArray =
       unwrapOrError(Obj->getSectionContents(StackMapSection));
 
@@ -2597,7 +2591,9 @@ static inline void printRelocHeader(raw_ostream &OS, bool Is64, bool IsRela) {
 template <class ELFT> void GNUStyle<ELFT>::printRelocations(const ELFO *Obj) {
   bool HasRelocSections = false;
   for (const Elf_Shdr &Sec : unwrapOrError(Obj->sections())) {
-    if (Sec.sh_type != ELF::SHT_REL && Sec.sh_type != ELF::SHT_RELA)
+    if (Sec.sh_type != ELF::SHT_REL && Sec.sh_type != ELF::SHT_RELA &&
+        Sec.sh_type != ELF::SHT_ANDROID_REL &&
+        Sec.sh_type != ELF::SHT_ANDROID_RELA)
       continue;
     HasRelocSections = true;
     StringRef Name = unwrapOrError(Obj->getSectionName(&Sec));
@@ -2606,9 +2602,12 @@ template <class ELFT> void GNUStyle<ELFT>::printRelocations(const ELFO *Obj) {
     OS << "\nRelocation section '" << Name << "' at offset 0x"
        << to_hexString(Offset, false) << " contains " << Entries
        << " entries:\n";
-    printRelocHeader(OS,  ELFT::Is64Bits, (Sec.sh_type == ELF::SHT_RELA));
+    printRelocHeader(OS, ELFT::Is64Bits,
+                     Sec.sh_type == ELF::SHT_RELA ||
+                         Sec.sh_type == ELF::SHT_ANDROID_RELA);
     const Elf_Shdr *SymTab = unwrapOrError(Obj->getSection(Sec.sh_link));
-    if (Sec.sh_type == ELF::SHT_REL) {
+    switch (Sec.sh_type) {
+    case ELF::SHT_REL:
       for (const auto &R : unwrapOrError(Obj->rels(&Sec))) {
         Elf_Rela Rela;
         Rela.r_offset = R.r_offset;
@@ -2616,9 +2615,16 @@ template <class ELFT> void GNUStyle<ELFT>::printRelocations(const ELFO *Obj) {
         Rela.r_addend = 0;
         printRelocation(Obj, SymTab, Rela, false);
       }
-    } else {
+      break;
+    case ELF::SHT_RELA:
       for (const auto &R : unwrapOrError(Obj->relas(&Sec)))
         printRelocation(Obj, SymTab, R, true);
+      break;
+    case ELF::SHT_ANDROID_REL:
+    case ELF::SHT_ANDROID_RELA:
+      for (const auto &R : unwrapOrError(Obj->android_relas(&Sec)))
+        printRelocation(Obj, SymTab, R, Sec.sh_type == ELF::SHT_ANDROID_RELA);
+      break;
     }
   }
   if (!HasRelocSections)
@@ -3368,7 +3374,7 @@ static std::string getGNUNoteTypeName(const uint32_t NT) {
   std::string string;
   raw_string_ostream OS(string);
   OS << format("Unknown note type (0x%08x)", NT);
-  return string;
+  return OS.str();
 }
 
 static std::string getFreeBSDNoteTypeName(const uint32_t NT) {
@@ -3396,7 +3402,30 @@ static std::string getFreeBSDNoteTypeName(const uint32_t NT) {
   std::string string;
   raw_string_ostream OS(string);
   OS << format("Unknown note type (0x%08x)", NT);
-  return string;
+  return OS.str();
+}
+
+static std::string getAMDGPUNoteTypeName(const uint32_t NT) {
+  static const struct {
+    uint32_t ID;
+    const char *Name;
+  } Notes[] = {
+    {ELF::NT_AMD_AMDGPU_HSA_METADATA,
+     "NT_AMD_AMDGPU_HSA_METADATA (HSA Metadata)"},
+    {ELF::NT_AMD_AMDGPU_ISA,
+     "NT_AMD_AMDGPU_ISA (ISA Version)"},
+    {ELF::NT_AMD_AMDGPU_PAL_METADATA,
+     "NT_AMD_AMDGPU_PAL_METADATA (PAL Metadata)"}
+  };
+
+  for (const auto &Note : Notes)
+    if (Note.ID == NT)
+      return std::string(Note.Name);
+
+  std::string string;
+  raw_string_ostream OS(string);
+  OS << format("Unknown note type (0x%08x)", NT);
+  return OS.str();
 }
 
 template <typename ELFT>
@@ -3439,6 +3468,39 @@ static void printGNUNote(raw_ostream &OS, uint32_t NoteType,
   OS << '\n';
 }
 
+template <typename ELFT>
+static void printAMDGPUNote(raw_ostream &OS, uint32_t NoteType,
+                            ArrayRef<typename ELFFile<ELFT>::Elf_Word> Words,
+                            size_t Size) {
+  switch (NoteType) {
+  default:
+    return;
+    case ELF::NT_AMD_AMDGPU_HSA_METADATA:
+      OS << "    HSA Metadata:\n"
+         << StringRef(reinterpret_cast<const char *>(Words.data()), Size);
+      break;
+    case ELF::NT_AMD_AMDGPU_ISA:
+      OS << "    ISA Version:\n"
+         << "        "
+         << StringRef(reinterpret_cast<const char *>(Words.data()), Size);
+      break;
+    case ELF::NT_AMD_AMDGPU_PAL_METADATA:
+      const uint32_t *PALMetadataBegin = reinterpret_cast<const uint32_t *>(Words.data());
+      const uint32_t *PALMetadataEnd = PALMetadataBegin + Size;
+      std::vector<uint32_t> PALMetadata(PALMetadataBegin, PALMetadataEnd);
+      std::string PALMetadataString;
+      auto Error = AMDGPU::PALMD::toString(PALMetadata, PALMetadataString);
+      OS << "    PAL Metadata:\n";
+      if (Error) {
+        OS << "        Invalid";
+        return;
+      }
+      OS << PALMetadataString;
+      break;
+  }
+  OS.flush();
+}
+
 template <class ELFT>
 void GNUStyle<ELFT>::printNotes(const ELFFile<ELFT> *Obj) {
   const Elf_Ehdr *e = Obj->getHeader();
@@ -3479,6 +3541,9 @@ void GNUStyle<ELFT>::printNotes(const ELFFile<ELFT> *Obj) {
         printGNUNote<ELFT>(OS, Type, Descriptor, DescriptorSize);
       } else if (Name == "FreeBSD") {
         OS << getFreeBSDNoteTypeName(Type) << '\n';
+      } else if (Name == "AMD") {
+        OS << getAMDGPUNoteTypeName(Type) << '\n';
+        printAMDGPUNote<ELFT>(OS, Type, Descriptor, DescriptorSize);
       } else {
         OS << "Unknown note type: (" << format_hex(Type, 10) << ')';
       }
@@ -3512,13 +3577,22 @@ template <class ELFT> void LLVMStyle<ELFT>::printFileHeaders(const ELFO *Obj) {
                   makeArrayRef(ElfDataEncoding));
       W.printNumber("FileVersion", e->e_ident[ELF::EI_VERSION]);
 
-      // Handle architecture specific OS/ABI values.
-      if (e->e_machine == ELF::EM_AMDGPU &&
-          e->e_ident[ELF::EI_OSABI] == ELF::ELFOSABI_AMDGPU_HSA)
-        W.printHex("OS/ABI", "AMDGPU_HSA", ELF::ELFOSABI_AMDGPU_HSA);
-      else
-        W.printEnum("OS/ABI", e->e_ident[ELF::EI_OSABI],
-                    makeArrayRef(ElfOSABI));
+      auto OSABI = makeArrayRef(ElfOSABI);
+      if (e->e_ident[ELF::EI_OSABI] >= ELF::ELFOSABI_FIRST_ARCH &&
+          e->e_ident[ELF::EI_OSABI] <= ELF::ELFOSABI_LAST_ARCH) {
+        switch (e->e_machine) {
+        case ELF::EM_AMDGPU:
+          OSABI = makeArrayRef(AMDGPUElfOSABI);
+          break;
+        case ELF::EM_ARM:
+          OSABI = makeArrayRef(ARMElfOSABI);
+          break;
+        case ELF::EM_TI_C6000:
+          OSABI = makeArrayRef(C6000ElfOSABI);
+          break;
+        }
+      }
+      W.printEnum("OS/ABI", e->e_ident[ELF::EI_OSABI], OSABI);
       W.printNumber("ABIVersion", e->e_ident[ELF::EI_ABIVERSION]);
       W.printBinary("Unused", makeArrayRef(e->e_ident).slice(ELF::EI_PAD));
     }
@@ -3533,6 +3607,11 @@ template <class ELFT> void LLVMStyle<ELFT>::printFileHeaders(const ELFO *Obj) {
       W.printFlags("Flags", e->e_flags, makeArrayRef(ElfHeaderMipsFlags),
                    unsigned(ELF::EF_MIPS_ARCH), unsigned(ELF::EF_MIPS_ABI),
                    unsigned(ELF::EF_MIPS_MACH));
+    else if (e->e_machine == EM_AMDGPU)
+      W.printFlags("Flags", e->e_flags, makeArrayRef(ElfHeaderAMDGPUFlags),
+                   unsigned(ELF::EF_AMDGPU_ARCH));
+    else if (e->e_machine == EM_RISCV)
+      W.printFlags("Flags", e->e_flags, makeArrayRef(ElfHeaderRISCVFlags));
     else
       W.printFlags("Flags", e->e_flags);
     W.printNumber("HeaderSize", e->e_ehsize);
@@ -3583,7 +3662,9 @@ template <class ELFT> void LLVMStyle<ELFT>::printRelocations(const ELFO *Obj) {
   for (const Elf_Shdr &Sec : unwrapOrError(Obj->sections())) {
     ++SectionNumber;
 
-    if (Sec.sh_type != ELF::SHT_REL && Sec.sh_type != ELF::SHT_RELA)
+    if (Sec.sh_type != ELF::SHT_REL && Sec.sh_type != ELF::SHT_RELA &&
+        Sec.sh_type != ELF::SHT_ANDROID_REL &&
+        Sec.sh_type != ELF::SHT_ANDROID_RELA)
       continue;
 
     StringRef Name = unwrapOrError(Obj->getSectionName(&Sec));
@@ -3614,6 +3695,11 @@ void LLVMStyle<ELFT>::printRelocations(const Elf_Shdr *Sec, const ELFO *Obj) {
     break;
   case ELF::SHT_RELA:
     for (const Elf_Rela &R : unwrapOrError(Obj->relas(Sec)))
+      printRelocation(Obj, R, SymTab);
+    break;
+  case ELF::SHT_ANDROID_REL:
+  case ELF::SHT_ANDROID_RELA:
+    for (const Elf_Rela &R : unwrapOrError(Obj->android_relas(Sec)))
       printRelocation(Obj, R, SymTab);
     break;
   }

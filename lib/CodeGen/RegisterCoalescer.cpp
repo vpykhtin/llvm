@@ -363,7 +363,7 @@ bool CoalescerPair::setRegisters(const MachineInstr *MI) {
     Flipped = true;
   }
 
-  const MachineRegisterInfo &MRI = MI->getParent()->getParent()->getRegInfo();
+  const MachineRegisterInfo &MRI = MI->getMF()->getRegInfo();
 
   if (TargetRegisterInfo::isPhysicalRegister(Dst)) {
     // Eliminate DstSub on a physreg.
@@ -1583,7 +1583,7 @@ bool RegisterCoalescer::joinCopy(MachineInstr *CopyMI, bool &Again) {
       std::swap(SrcRC, DstRC);
     }
     if (!TRI->shouldCoalesce(CopyMI, SrcRC, SrcIdx, DstRC, DstIdx,
-                            CP.getNewRC())) {
+                             CP.getNewRC(), *LIS)) {
       DEBUG(dbgs() << "\tSubtarget bailed on coalescing.\n");
       return false;
     }
@@ -2685,8 +2685,8 @@ void JoinVals::pruneValues(JoinVals &Other,
           for (MachineOperand &MO :
                Indexes->getInstructionFromIndex(Def)->operands()) {
             if (MO.isReg() && MO.isDef() && MO.getReg() == Reg) {
-              if (MO.getSubReg() != 0)
-                MO.setIsUndef(EraseImpDef);
+              if (MO.getSubReg() != 0 && MO.isUndef() && !EraseImpDef)
+                MO.setIsUndef(false);
               MO.setIsDead(false);
             }
           }

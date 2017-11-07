@@ -19,7 +19,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/LoopPass.h"
-#include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Analysis/ScalarEvolutionExpander.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
@@ -55,15 +55,17 @@ namespace {
     LoopInfo         *LI;
     ScalarEvolution  *SE;
     DominatorTree    *DT;
-
+    SCEVExpander     &Rewriter;
     SmallVectorImpl<WeakTrackingVH> &DeadInsts;
 
     bool Changed;
 
   public:
     SimplifyIndvar(Loop *Loop, ScalarEvolution *SE, DominatorTree *DT,
-                   LoopInfo *LI, SmallVectorImpl<WeakTrackingVH> &Dead)
-        : L(Loop), LI(LI), SE(SE), DT(DT), DeadInsts(Dead), Changed(false) {
+                   LoopInfo *LI, SCEVExpander &Rewriter,
+                   SmallVectorImpl<WeakTrackingVH> &Dead)
+        : L(Loop), LI(LI), SE(SE), DT(DT), Rewriter(Rewriter), DeadInsts(Dead),
+          Changed(false) {
       assert(LI && "IV simplification requires LoopInfo");
     }
 
@@ -77,7 +79,7 @@ namespace {
     Value *foldIVUser(Instruction *UseInst, Instruction *IVOperand);
 
     bool eliminateIdentitySCEV(Instruction *UseInst, Instruction *IVOperand);
-    bool foldConstantSCEV(Instruction *UseInst);
+    bool replaceIVUserWithLoopInvariant(Instruction *UseInst);
 
     bool eliminateOverflowIntrinsic(CallInst *CI);
     bool eliminateIVUser(Instruction *UseInst, Instruction *IVOperand);
@@ -536,28 +538,38 @@ bool SimplifyIndvar::eliminateIVUser(Instruction *UseInst,
   return false;
 }
 
-/// Replace the UseInst with a constant if possible
-bool SimplifyIndvar::foldConstantSCEV(Instruction *I) {
+static Instruction *GetLoopInvariantInsertPosition(Loop *L, Instruction *Hint) {
+  if (auto *BB = L->getLoopPreheader())
+    return BB->getTerminator();
+
+  return Hint;
+}
+
+/// Replace the UseInst with a constant if possible.
+bool SimplifyIndvar::replaceIVUserWithLoopInvariant(Instruction *I) {
   if (!SE->isSCEVable(I->getType()))
     return false;
 
   // Get the symbolic expression for this instruction.
   const SCEV *S = SE->getSCEV(I);
 
-  const Loop *L = LI->getLoopFor(I->getParent());
-  S = SE->getSCEVAtScope(S, L);
+  if (!SE->isLoopInvariant(S, L))
+    return false;
 
-  if (auto *C = dyn_cast<SCEVConstant>(S)) {
-    I->replaceAllUsesWith(C->getValue());
-    DEBUG(dbgs() << "INDVARS: Replace IV user: " << *I
-                 << " with constant: " << *C << '\n');
-    ++NumFoldedUser;
-    Changed = true;
-    DeadInsts.emplace_back(I);
-    return true;
-  }
+  // Do not generate something ridiculous even if S is loop invariant.
+  if (Rewriter.isHighCostExpansion(S, L, I))
+    return false;
 
-  return false;
+  auto *IP = GetLoopInvariantInsertPosition(L, I);
+  auto *Invariant = Rewriter.expandCodeFor(S, I->getType(), IP);
+
+  I->replaceAllUsesWith(Invariant);
+  DEBUG(dbgs() << "INDVARS: Replace IV user: " << *I
+               << " with loop invariant: " << *S << '\n');
+  ++NumFoldedUser;
+  Changed = true;
+  DeadInsts.emplace_back(I);
+  return true;
 }
 
 /// Eliminate any operation that SCEV can prove is an identity function.
@@ -695,7 +707,7 @@ bool SimplifyIndvar::strengthenRightShift(BinaryOperator *BO,
 
 /// Add all uses of Def to the current IV's worklist.
 static void pushIVUsers(
-  Instruction *Def,
+  Instruction *Def, Loop *L,
   SmallPtrSet<Instruction*,16> &Simplified,
   SmallVectorImpl< std::pair<Instruction*,Instruction*> > &SimpleIVUsers) {
 
@@ -706,8 +718,19 @@ static void pushIVUsers(
     // Also ensure unique worklist users.
     // If Def is a LoopPhi, it may not be in the Simplified set, so check for
     // self edges first.
-    if (UI != Def && Simplified.insert(UI).second)
-      SimpleIVUsers.push_back(std::make_pair(UI, Def));
+    if (UI == Def)
+      continue;
+
+    // Only change the current Loop, do not change the other parts (e.g. other
+    // Loops).
+    if (!L->contains(UI))
+      continue;
+
+    // Do not push the same instruction more than once.
+    if (!Simplified.insert(UI).second)
+      continue;
+
+    SimpleIVUsers.push_back(std::make_pair(UI, Def));
   }
 }
 
@@ -757,7 +780,7 @@ void SimplifyIndvar::simplifyUsers(PHINode *CurrIV, IVVisitor *V) {
   // Push users of the current LoopPhi. In rare cases, pushIVUsers may be
   // called multiple times for the same LoopPhi. This is the proper thing to
   // do for loop header phis that use each other.
-  pushIVUsers(CurrIV, Simplified, SimpleIVUsers);
+  pushIVUsers(CurrIV, L, Simplified, SimpleIVUsers);
 
   while (!SimpleIVUsers.empty()) {
     std::pair<Instruction*, Instruction*> UseOper =
@@ -767,8 +790,9 @@ void SimplifyIndvar::simplifyUsers(PHINode *CurrIV, IVVisitor *V) {
     // Bypass back edges to avoid extra work.
     if (UseInst == CurrIV) continue;
 
-    // Try to replace UseInst with a constant before any other simplifications
-    if (foldConstantSCEV(UseInst))
+    // Try to replace UseInst with a loop invariant before any other
+    // simplifications.
+    if (replaceIVUserWithLoopInvariant(UseInst))
       continue;
 
     Instruction *IVOperand = UseOper.second;
@@ -784,7 +808,7 @@ void SimplifyIndvar::simplifyUsers(PHINode *CurrIV, IVVisitor *V) {
       continue;
 
     if (eliminateIVUser(UseOper.first, IVOperand)) {
-      pushIVUsers(IVOperand, Simplified, SimpleIVUsers);
+      pushIVUsers(IVOperand, L, Simplified, SimpleIVUsers);
       continue;
     }
 
@@ -794,7 +818,7 @@ void SimplifyIndvar::simplifyUsers(PHINode *CurrIV, IVVisitor *V) {
           (isa<ShlOperator>(BO) && strengthenRightShift(BO, IVOperand))) {
         // re-queue uses of the now modified binary operator and fall
         // through to the checks that remain.
-        pushIVUsers(IVOperand, Simplified, SimpleIVUsers);
+        pushIVUsers(IVOperand, L, Simplified, SimpleIVUsers);
       }
     }
 
@@ -804,7 +828,7 @@ void SimplifyIndvar::simplifyUsers(PHINode *CurrIV, IVVisitor *V) {
       continue;
     }
     if (isSimpleIVUser(UseOper.first, L, SE)) {
-      pushIVUsers(UseOper.first, Simplified, SimpleIVUsers);
+      pushIVUsers(UseOper.first, L, Simplified, SimpleIVUsers);
     }
   }
 }
@@ -817,8 +841,9 @@ void IVVisitor::anchor() { }
 /// by using ScalarEvolution to analyze the IV's recurrence.
 bool simplifyUsersOfIV(PHINode *CurrIV, ScalarEvolution *SE, DominatorTree *DT,
                        LoopInfo *LI, SmallVectorImpl<WeakTrackingVH> &Dead,
-                       IVVisitor *V) {
-  SimplifyIndvar SIV(LI->getLoopFor(CurrIV->getParent()), SE, DT, LI, Dead);
+                       SCEVExpander &Rewriter, IVVisitor *V) {
+  SimplifyIndvar SIV(LI->getLoopFor(CurrIV->getParent()), SE, DT, LI, Rewriter,
+                     Dead);
   SIV.simplifyUsers(CurrIV, V);
   return SIV.hasChanged();
 }
@@ -827,9 +852,13 @@ bool simplifyUsersOfIV(PHINode *CurrIV, ScalarEvolution *SE, DominatorTree *DT,
 /// loop. This does not actually change or add IVs.
 bool simplifyLoopIVs(Loop *L, ScalarEvolution *SE, DominatorTree *DT,
                      LoopInfo *LI, SmallVectorImpl<WeakTrackingVH> &Dead) {
+  SCEVExpander Rewriter(*SE, SE->getDataLayout(), "indvars");
+#ifndef NDEBUG
+  Rewriter.setDebugType(DEBUG_TYPE);
+#endif
   bool Changed = false;
   for (BasicBlock::iterator I = L->getHeader()->begin(); isa<PHINode>(I); ++I) {
-    Changed |= simplifyUsersOfIV(cast<PHINode>(I), SE, DT, LI, Dead);
+    Changed |= simplifyUsersOfIV(cast<PHINode>(I), SE, DT, LI, Dead, Rewriter);
   }
   return Changed;
 }

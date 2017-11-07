@@ -207,6 +207,7 @@ StringRef Triple::getOSTypeName(OSType Kind) {
   case WatchOS: return "watchos";
   case Mesa3D: return "mesa3d";
   case Contiki: return "contiki";
+  case AMDPAL: return "amdpal";
   }
 
   llvm_unreachable("Invalid OSType");
@@ -234,6 +235,7 @@ StringRef Triple::getEnvironmentTypeName(EnvironmentType Kind) {
   case AMDOpenCL: return "amdopencl";
   case CoreCLR: return "coreclr";
   case OpenCL: return "opencl";
+  case Simulator: return "simulator";
   }
 
   llvm_unreachable("Invalid EnvironmentType!");
@@ -499,6 +501,7 @@ static Triple::OSType parseOS(StringRef OSName) {
     .StartsWith("watchos", Triple::WatchOS)
     .StartsWith("mesa3d", Triple::Mesa3D)
     .StartsWith("contiki", Triple::Contiki)
+    .StartsWith("amdpal", Triple::AMDPAL)
     .Default(Triple::UnknownOS);
 }
 
@@ -523,6 +526,7 @@ static Triple::EnvironmentType parseEnvironment(StringRef EnvironmentName) {
     .StartsWith("amdopencl", Triple::AMDOpenCL)
     .StartsWith("coreclr", Triple::CoreCLR)
     .StartsWith("opencl", Triple::OpenCL)
+    .StartsWith("simulator", Triple::Simulator)
     .Default(Triple::UnknownEnvironment);
 }
 
