@@ -76,6 +76,7 @@
 #include "llvm/CodeGen/MachineLoopInfo.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/BranchProbability.h"
@@ -84,7 +85,6 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetRegisterInfo.h"
 #include <cassert>
 #include <iterator>
 
@@ -144,7 +144,7 @@ namespace {
                           const PrintFP &P) LLVM_ATTRIBUTE_UNUSED;
   raw_ostream &operator<<(raw_ostream &OS, const PrintFP &P) {
     OS << "{ SplitB:" << PrintMB(P.FP.SplitB)
-       << ", PredR:" << PrintReg(P.FP.PredR, &P.TRI)
+       << ", PredR:" << printReg(P.FP.PredR, &P.TRI)
        << ", TrueB:" << PrintMB(P.FP.TrueB)
        << ", FalseB:" << PrintMB(P.FP.FalseB)
        << ", JoinB:" << PrintMB(P.FP.JoinB) << " }";

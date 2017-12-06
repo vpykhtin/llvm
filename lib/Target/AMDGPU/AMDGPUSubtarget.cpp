@@ -23,7 +23,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/CodeGen/MachineScheduler.h"
 #include "llvm/IR/MDBuilder.h"
-#include "llvm/Target/TargetFrameLowering.h"
+#include "llvm/CodeGen/TargetFrameLowering.h"
 #include <algorithm>
 
 using namespace llvm;
@@ -121,6 +121,7 @@ AMDGPUSubtarget::AMDGPUSubtarget(const Triple &TT, StringRef GPU, StringRef FS,
     DebuggerReserveRegs(false),
     DebuggerEmitPrologue(false),
 
+    EnableHugePrivateBuffer(false),
     EnableVGPRSpilling(false),
     EnablePromoteAlloca(false),
     EnableLoadStoreOpt(false),
@@ -544,6 +545,7 @@ unsigned SISubtarget::getMaxNumVGPRs(const MachineFunction &MF) const {
   return MaxNumVGPRs - getReservedNumVGPRs(MF);
 }
 
+namespace {
 struct MemOpClusterMutation : ScheduleDAGMutation {
   const SIInstrInfo *TII;
 
@@ -592,6 +594,7 @@ struct MemOpClusterMutation : ScheduleDAGMutation {
     }
   }
 };
+} // namespace
 
 void SISubtarget::getPostRAMutations(
     std::vector<std::unique_ptr<ScheduleDAGMutation>> &Mutations) const {

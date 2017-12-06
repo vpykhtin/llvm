@@ -336,6 +336,14 @@ private:
         .getRawSubclassData();
   }
 
+  template <typename SDNodeTy>
+  static uint16_t getSyntheticNodeSubclassData(unsigned Opc, unsigned Order,
+                                                SDVTList VTs, EVT MemoryVT,
+                                                MachineMemOperand *MMO) {
+    return SDNodeTy(Opc, Order, DebugLoc(), VTs, MemoryVT, MMO)
+         .getRawSubclassData();
+  }
+
   void createOperands(SDNode *Node, ArrayRef<SDValue> Vals) {
     assert(!Node->OperandList && "Node already has operands");
     SDUse *Ops = OperandRecycler.allocate(
@@ -1176,15 +1184,21 @@ public:
                           unsigned R, bool IsIndirect, const DebugLoc &DL,
                           unsigned O);
 
-  /// Constant
+  /// Creates a constant SDDbgValue node.
   SDDbgValue *getConstantDbgValue(DIVariable *Var, DIExpression *Expr,
                                   const Value *C, const DebugLoc &DL,
                                   unsigned O);
 
-  /// FrameIndex
+  /// Creates a FrameIndex SDDbgValue node.
   SDDbgValue *getFrameIndexDbgValue(DIVariable *Var, DIExpression *Expr,
                                     unsigned FI, const DebugLoc &DL,
                                     unsigned O);
+
+  /// Transfer debug values from one node to another, while optionally
+  /// generating fragment expressions for split-up values. If \p InvalidateDbg
+  /// is set, debug values are invalidated after they are transferred.
+  void transferDbgValues(SDValue From, SDValue To, unsigned OffsetInBits = 0,
+                         unsigned SizeInBits = 0, bool InvalidateDbg = true);
 
   /// Remove the specified node from the system. If any of its
   /// operands then becomes dead, remove them as well. Inform UpdateListener
@@ -1265,10 +1279,6 @@ public:
   ArrayRef<SDDbgValue*> GetDbgValues(const SDNode* SD) {
     return DbgInfo->getSDDbgValues(SD);
   }
-
-private:
-  /// Transfer SDDbgValues. Called via ReplaceAllUses{OfValue}?With
-  void TransferDbgValues(SDValue From, SDValue To);
 
 public:
   /// Return true if there are any SDDbgValue nodes associated

@@ -16,7 +16,7 @@
 
 #include "PPC.h"
 #include "PPCRegisterInfo.h"
-#include "llvm/Target/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
 
 #define GET_INSTRINFO_HEADER
 #include "PPCGenInstrInfo.inc"
@@ -282,6 +282,9 @@ public:
   ArrayRef<std::pair<unsigned, const char *>>
   getSerializableBitmaskMachineOperandTargetFlags() const override;
 
+  // Expand VSX Memory Pseudo instruction to either a VSX or a FP instruction.
+  bool expandVSXMemPseudo(MachineInstr &MI) const;
+
   // Lower pseudo instructions after register allocation.
   bool expandPostRAPseudo(MachineInstr &MI) const override;
 
@@ -293,6 +296,8 @@ public:
   }
   const TargetRegisterClass *updatedRC(const TargetRegisterClass *RC) const;
   static int getRecordFormOpcode(unsigned Opcode);
+
+  bool isTOCSaveMI(const MachineInstr &MI) const;
 
   bool isSignOrZeroExtended(const MachineInstr &MI, bool SignExt,
                             const unsigned PhiDepth) const;

@@ -28,15 +28,15 @@
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/TargetFrameLowering.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetFrameLowering.h"
-#include "llvm/Target/TargetInstrInfo.h"
-#include "llvm/Target/TargetRegisterInfo.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
 #include <algorithm>
 #include <cassert>
 #include <iterator>
@@ -598,10 +598,10 @@ unsigned RegScavenger::scavengeRegisterBackwards(const TargetRegisterClass &RC,
     ScavengedInfo &Scavenged = spill(Reg, RC, SPAdj, SpillBefore, ReloadBefore);
     Scavenged.Restore = &*std::prev(SpillBefore);
     LiveUnits.removeReg(Reg);
-    DEBUG(dbgs() << "Scavenged register with spill: " << PrintReg(Reg, TRI)
+    DEBUG(dbgs() << "Scavenged register with spill: " << printReg(Reg, TRI)
           << " until " << *SpillBefore);
   } else {
-    DEBUG(dbgs() << "Scavenged free register: " << PrintReg(Reg, TRI) << '\n');
+    DEBUG(dbgs() << "Scavenged free register: " << printReg(Reg, TRI) << '\n');
   }
   return Reg;
 }

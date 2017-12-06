@@ -22,6 +22,9 @@
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/CodeGen/ParallelCG.h"
 #include "llvm/CodeGen/RuntimeLibcalls.h"
+#include "llvm/CodeGen/TargetLowering.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/Config/config.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
@@ -52,10 +55,7 @@
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/YAMLTraits.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetOptions.h"
-#include "llvm/Target/TargetRegisterInfo.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/Internalize.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
@@ -131,7 +131,6 @@ void LTOCodeGenerator::initializeLTOPasses() {
   initializeMemCpyOptLegacyPassPass(R);
   initializeDCELegacyPassPass(R);
   initializeCFGSimplifyPassPass(R);
-  initializeLateCFGSimplifyPassPass(R);
 }
 
 void LTOCodeGenerator::setAsmUndefinedRefs(LTOModule *Mod) {
@@ -473,11 +472,9 @@ void LTOCodeGenerator::restoreLinkageForExternals() {
     GV.setLinkage(I->second);
   };
 
-  std::for_each(MergedModule->begin(), MergedModule->end(), externalize);
-  std::for_each(MergedModule->global_begin(), MergedModule->global_end(),
-                externalize);
-  std::for_each(MergedModule->alias_begin(), MergedModule->alias_end(),
-                externalize);
+  llvm::for_each(MergedModule->functions(), externalize);
+  llvm::for_each(MergedModule->globals(), externalize);
+  llvm::for_each(MergedModule->aliases(), externalize);
 }
 
 void LTOCodeGenerator::verifyMergedModuleOnce() {

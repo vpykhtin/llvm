@@ -42,6 +42,8 @@
 #include "llvm/CodeGen/RuntimeLibcalls.h"
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/CodeGen/SelectionDAGNodes.h"
+#include "llvm/CodeGen/TargetCallingConv.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/ValueTypes.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
@@ -70,8 +72,6 @@
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetCallingConv.h"
-#include "llvm/Target/TargetInstrInfo.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include <algorithm>
@@ -3795,7 +3795,8 @@ SDValue AArch64TargetLowering::LowerGlobalAddress(SDValue Op,
 SDValue
 AArch64TargetLowering::LowerDarwinGlobalTLSAddress(SDValue Op,
                                                    SelectionDAG &DAG) const {
-  assert(Subtarget->isTargetDarwin() && "TLS only supported on Darwin");
+  assert(Subtarget->isTargetDarwin() &&
+         "This function expects a Darwin target");
 
   SDLoc DL(Op);
   MVT PtrVT = getPointerTy(DAG.getDataLayout());
@@ -4981,7 +4982,7 @@ static SDValue getEstimate(const AArch64Subtarget *ST, unsigned Opcode,
       // the initial estimate is 2^-8.  Thus the number of extra steps to refine
       // the result for float (23 mantissa bits) is 2 and for double (52
       // mantissa bits) is 3.
-      ExtraSteps = VT == MVT::f64 ? 3 : 2;
+      ExtraSteps = VT.getScalarType() == MVT::f64 ? 3 : 2;
 
     return DAG.getNode(Opcode, SDLoc(Operand), VT, Operand);
   }
@@ -9561,8 +9562,6 @@ static SDValue replaceSplatVectorStore(SelectionDAG &DAG, StoreSDNode &St) {
 static SDValue splitStores(SDNode *N, TargetLowering::DAGCombinerInfo &DCI,
                            SelectionDAG &DAG,
                            const AArch64Subtarget *Subtarget) {
-  if (!DCI.isBeforeLegalize())
-    return SDValue();
 
   StoreSDNode *S = cast<StoreSDNode>(N);
   if (S->isVolatile() || S->isIndexed())

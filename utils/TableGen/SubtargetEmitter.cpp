@@ -601,8 +601,9 @@ void SubtargetEmitter::EmitProcessorResources(const CodeGenProcModel &ProcModel,
     else {
       // Find the SuperIdx
       if (PRDef->getValueInit("Super")->isComplete()) {
-        SuperDef = SchedModels.findProcResUnits(
-          PRDef->getValueAsDef("Super"), ProcModel);
+        SuperDef =
+            SchedModels.findProcResUnits(PRDef->getValueAsDef("Super"),
+                                         ProcModel, PRDef->getLoc());
         SuperIdx = ProcModel.getProcResourceIdx(SuperDef);
       }
       NumUnits = PRDef->getValueAsInt("NumUnits");
@@ -667,8 +668,8 @@ Record *SubtargetEmitter::FindWriteResources(
   // then call FindWriteResources recursively with that model here.
   if (!ResDef) {
     PrintFatalError(ProcModel.ModelDef->getLoc(),
-                  std::string("Processor does not define resources for ")
-                  + SchedWrite.TheDef->getName());
+                    Twine("Processor does not define resources for ") +
+                    SchedWrite.TheDef->getName());
   }
   return ResDef;
 }
@@ -719,8 +720,8 @@ Record *SubtargetEmitter::FindReadAdvance(const CodeGenSchedRW &SchedRead,
   // then call FindReadAdvance recursively with that model here.
   if (!ResDef && SchedRead.TheDef->getName() != "ReadDefault") {
     PrintFatalError(ProcModel.ModelDef->getLoc(),
-                  std::string("Processor does not define resources for ")
-                  + SchedRead.TheDef->getName());
+                    Twine("Processor does not define resources for ") +
+                    SchedRead.TheDef->getName());
   }
   return ResDef;
 }
@@ -739,7 +740,7 @@ void SubtargetEmitter::ExpandProcResources(RecVec &PRVec,
       SubResources = PRDef->getValueAsListOfDefs("Resources");
     else {
       SubResources.push_back(PRDef);
-      PRDef = SchedModels.findProcResUnits(PRVec[i], PM);
+      PRDef = SchedModels.findProcResUnits(PRDef, PM, PRDef->getLoc());
       for (Record *SubDef = PRDef;
            SubDef->getValueInit("Super")->isComplete();) {
         if (SubDef->isSubClassOf("ProcResGroup")) {
@@ -748,7 +749,8 @@ void SubtargetEmitter::ExpandProcResources(RecVec &PRVec,
                           " cannot be a super resources.");
         }
         Record *SuperDef =
-          SchedModels.findProcResUnits(SubDef->getValueAsDef("Super"), PM);
+            SchedModels.findProcResUnits(SubDef->getValueAsDef("Super"), PM,
+                                         SubDef->getLoc());
         PRVec.push_back(SuperDef);
         Cycles.push_back(Cycles[i]);
         SubDef = SuperDef;
