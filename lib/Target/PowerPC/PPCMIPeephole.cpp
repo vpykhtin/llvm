@@ -29,13 +29,15 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/ADT/Statistic.h"
 #include "MCTargetDesc/PPCPredicates.h"
 
 using namespace llvm;
 
 #define DEBUG_TYPE "ppc-mi-peepholes"
 
+STATISTIC(RemoveTOCSave, "Number of TOC saves removed");
+STATISTIC(MultiTOCSaves,
+          "Number of functions with multiple TOC saves that must be kept");
 STATISTIC(NumEliminatedSExt, "Number of eliminated sign-extensions");
 STATISTIC(NumEliminatedZExt, "Number of eliminated zero-extensions");
 STATISTIC(NumOptADDLIs, "Number of optimized ADD instruction fed by LI");
@@ -78,7 +80,9 @@ private:
 
   // Perform peepholes.
   bool eliminateRedundantCompare(void);
-
+  bool eliminateRedundantTOCSaves(std::map<MachineInstr *, bool> &TOCSaves);
+  void UpdateTOCSaves(std::map<MachineInstr *, bool> &TOCSaves,
+                      MachineInstr *MI);
   // Find the "true" register represented by SrcReg (following chains
   // of copies and subreg_to_reg operations).
   unsigned lookThruCopyLike(unsigned SrcReg);
@@ -176,10 +180,37 @@ getKnownLeadingZeroCount(MachineInstr *MI, const PPCInstrInfo *TII) {
   return 0;
 }
 
+// This function maintains a map for the pairs <TOC Save Instr, Keep>
+// Each time a new TOC save is encountered, it checks if any of the exisiting
+// ones are dominated by the new one. If so, it marks the exisiting one as
+// redundant by setting it's entry in the map as false. It then adds the new
+// instruction to the map with either true or false depending on if any
+// exisiting instructions dominated the new one.
+void PPCMIPeephole::UpdateTOCSaves(
+  std::map<MachineInstr *, bool> &TOCSaves, MachineInstr *MI) {
+  assert(TII->isTOCSaveMI(*MI) && "Expecting a TOC save instruction here");
+  bool Keep = true;
+  for (auto It = TOCSaves.begin(); It != TOCSaves.end(); It++ ) {
+    MachineInstr *CurrInst = It->first;
+    // If new instruction dominates an exisiting one, mark exisiting one as
+    // redundant.
+    if (It->second && MDT->dominates(MI, CurrInst))
+      It->second = false;
+    // Check if the new instruction is redundant.
+    if (MDT->dominates(CurrInst, MI)) {
+      Keep = false;
+      break;
+    }
+  }
+  // Add new instruction to map.
+  TOCSaves[MI] = Keep;
+}
+
 // Perform peephole optimizations.
 bool PPCMIPeephole::simplifyCode(void) {
   bool Simplified = false;
   MachineInstr* ToErase = nullptr;
+  std::map<MachineInstr *, bool> TOCSaves;
 
   for (MachineBasicBlock &MBB : *MF) {
     for (MachineInstr &MI : MBB) {
@@ -201,6 +232,18 @@ bool PPCMIPeephole::simplifyCode(void) {
       default:
         break;
 
+      case PPC::STD: {
+        MachineFrameInfo &MFI = MF->getFrameInfo();
+        if (MFI.hasVarSizedObjects() ||
+            !MF->getSubtarget<PPCSubtarget>().isELFv2ABI())
+          break;
+        // When encountering a TOC save instruction, call UpdateTOCSaves
+        // to add it to the TOCSaves map and mark any exisiting TOC saves
+        // it dominates as redundant.
+        if (TII->isTOCSaveMI(MI))
+          UpdateTOCSaves(TOCSaves, &MI);
+        break;
+      }
       case PPC::XXPERMDI: {
         // Perform simplifications of 2x64 vector swaps and splats.
         // A swap is identified by an immediate value of 2, and a splat
@@ -375,53 +418,6 @@ bool PPCMIPeephole::simplifyCode(void) {
             MI.getOperand(2).setImm(NewElem);
           }
         }
-
-        // Splat is fed by a SWAP which is a permute of this form
-        //  XXPERMDI %VA, %VA, 2
-        // Since the splat instruction can use any of the vector elements to do
-        //  the splat we do not have to rearrange the elements in the vector
-        //  with a swap before we do the splat. We can simply do the splat from
-        //  a different index.
-        // If the swap has only one use (the splat) then we can completely
-        //  remove the swap too.
-        if (DefOpcode == PPC::XXPERMDI && MI.getOperand(1).isImm()) {
-          unsigned SwapRes = DefMI->getOperand(0).getReg();
-          unsigned SwapOp1 = DefMI->getOperand(1).getReg();
-          unsigned SwapOp2 = DefMI->getOperand(2).getReg();
-          unsigned SwapImm = DefMI->getOperand(3).getImm();
-          unsigned SplatImm = MI.getOperand(1).getImm();
-
-          // Break if this permute is not a swap.
-          if (SwapOp1 != SwapOp2 || SwapImm != 2)
-            break;
-
-          unsigned NewElem = 0;
-          // Compute the new index to use for the splat.
-          if (MI.getOpcode() == PPC::VSPLTB)
-            NewElem = (SplatImm + 8) & 0xF;
-          else if (MI.getOpcode() == PPC::VSPLTH)
-            NewElem = (SplatImm + 4) & 0x7;
-          else if (MI.getOpcode() == PPC::XXSPLTW)
-            NewElem = (SplatImm + 2) & 0x3;
-          else {
-            DEBUG(dbgs() << "Unknown splat opcode.");
-            DEBUG(MI.dump());
-            break;
-          }
-
-          if (MRI->hasOneNonDBGUse(SwapRes)) {
-            DEBUG(dbgs() << "Removing redundant swap: ");
-            DEBUG(DefMI->dump());
-            ToErase = DefMI;
-          }
-          Simplified = true;
-          DEBUG(dbgs() << "Changing splat immediate from " << SplatImm <<
-                " to " << NewElem << " in instruction: ");
-          DEBUG(MI.dump());
-          MI.getOperand(1).setImm(NewElem);
-          MI.getOperand(2).setReg(SwapOp1);
-        }
-
         break;
       }
       case PPC::XVCVDPSP: {
@@ -730,6 +726,8 @@ bool PPCMIPeephole::simplifyCode(void) {
     }
   }
 
+  // Eliminate all the TOC save instructions which are redundant.
+  Simplified |= eliminateRedundantTOCSaves(TOCSaves);
   // We try to eliminate redundant compare instruction.
   Simplified |= eliminateRedundantCompare();
 
@@ -861,8 +859,12 @@ static bool eligibleForCompareElimination(MachineBasicBlock &MBB,
           !MRI->hasOneNonDBGUse(CndReg))
         return false;
 
-      // We skip this BB if a physical register is used in comparison.
       MachineInstr *CMPI = MRI->getVRegDef(CndReg);
+      // We assume compare and branch are in the same BB for ease of analysis.
+      if (CMPI->getParent() != &BB)
+        return false;
+
+      // We skip this BB if a physical register is used in comparison.
       for (MachineOperand &MO : CMPI->operands())
         if (MO.isReg() && !TargetRegisterInfo::isVirtualRegister(MO.getReg()))
           return false;
@@ -931,6 +933,30 @@ static bool eligibleForCompareElimination(MachineBasicBlock &MBB,
   return false;
 }
 
+// This function will iterate over the input map containing a pair of TOC save
+// instruction and a flag. The flag will be set to false if the TOC save is proven
+// redundant. This function will erase from the basic block all the TOC saves
+// marked as redundant.
+bool PPCMIPeephole::eliminateRedundantTOCSaves(
+    std::map<MachineInstr *, bool> &TOCSaves) {
+  bool Simplified = false;
+  int NumKept = 0;
+  for (auto TOCSave : TOCSaves) {
+    if (!TOCSave.second) {
+      TOCSave.first->eraseFromParent();
+      RemoveTOCSave++;
+      Simplified = true;
+    } else {
+      NumKept++;
+    }
+  }
+
+  if (NumKept > 1)
+    MultiTOCSaves++;
+
+  return Simplified;
+}
+
 // If multiple conditional branches are executed based on the (essentially)
 // same comparison, we merge compare instructions into one and make multiple
 // conditional branches on this comparison.
@@ -968,7 +994,7 @@ bool PPCMIPeephole::eliminateRedundantCompare(void) {
     //
     // As partially redundant case, we additionally handle if MBB2 has one
     // additional predecessor, which has only one successor (MBB2).
-    // In this case, we move the compre instruction originally in MBB2 into
+    // In this case, we move the compare instruction originally in MBB2 into
     // MBBtoMoveCmp. This partially redundant case is typically appear by
     // compiling a while loop; here, MBBtoMoveCmp is the loop preheader.
     //

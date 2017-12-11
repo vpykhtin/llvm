@@ -23,8 +23,8 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/CodeGen/ScheduleDAGMutation.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/MC/MCInstrItineraries.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -180,6 +180,25 @@ public:
   /// \brief Perform target specific adjustments to the latency of a schedule
   /// dependency.
   void adjustSchedDependency(SUnit *def, SUnit *use, SDep& dep) const override;
+
+  unsigned getVectorLength() const {
+    assert(useHVXOps());
+    if (useHVX64BOps())
+      return 64;
+    if (useHVX128BOps())
+      return 128;
+    llvm_unreachable("Invalid HVX vector length settings");
+  }
+
+  bool isHVXVectorType(MVT VecTy) const {
+    if (!VecTy.isVector() || !useHVXOps())
+      return false;
+    unsigned ElemWidth = VecTy.getVectorElementType().getSizeInBits();
+    if (ElemWidth < 8 || ElemWidth > 64)
+      return false;
+    unsigned VecWidth = VecTy.getSizeInBits();
+    return VecWidth == 8*getVectorLength() || VecWidth == 16*getVectorLength();
+  }
 
   unsigned getL1CacheLineSize() const;
   unsigned getL1PrefetchDistance() const;

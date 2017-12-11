@@ -42,8 +42,12 @@
 #include "llvm/CodeGen/ScheduleDFS.h"
 #include "llvm/CodeGen/ScheduleHazardRecognizer.h"
 #include "llvm/CodeGen/SlotIndexes.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSchedule.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/MC/LaneBitmask.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
@@ -52,10 +56,6 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetInstrInfo.h"
-#include "llvm/Target/TargetLowering.h"
-#include "llvm/Target/TargetRegisterInfo.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -1130,7 +1130,7 @@ void ScheduleDAGMILive::updatePressureDiffs(
         PDiff.addPressureChange(Reg, Decrement, &MRI);
         DEBUG(
           dbgs() << "  UpdateRegP: SU(" << SU.NodeNum << ") "
-                 << PrintReg(Reg, TRI) << ':' << PrintLaneMask(P.LaneMask)
+                 << printReg(Reg, TRI) << ':' << PrintLaneMask(P.LaneMask)
                  << ' ' << *SU.getInstr();
           dbgs() << "              to ";
           PDiff.dump(*TRI);
@@ -1138,7 +1138,7 @@ void ScheduleDAGMILive::updatePressureDiffs(
       }
     } else {
       assert(P.LaneMask.any());
-      DEBUG(dbgs() << "  LiveReg: " << PrintVRegOrUnit(Reg, TRI) << "\n");
+      DEBUG(dbgs() << "  LiveReg: " << printVRegOrUnit(Reg, TRI) << "\n");
       // This may be called before CurrentBottom has been initialized. However,
       // BotRPTracker must have a valid position. We want the value live into the
       // instruction or live out of the block, so ask for the previous
