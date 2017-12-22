@@ -18,12 +18,26 @@
 #include <limits>
 #include <memory>
 #include <vector>
+#include "llvm/CodeGen/ScheduleDFS.h"
 
 namespace llvm {
 
 class MachineInstr;
 class SUnit;
 class raw_ostream;
+
+class SchedDFSResult2 : public SchedDFSResult {
+public:
+  SchedDFSResult2(unsigned Limit) :
+    SchedDFSResult(/*BottomU*/true, Limit) {}
+
+  bool isInTreeOrDescendant(const SUnit *Node, unsigned SubTreeID) const;
+
+  bool isParentTree(unsigned PotentailParentSubTreeID,
+                    unsigned PotentialChildSubTreeID) const;
+
+  unsigned getTopMostParentSubTreeID(const SUnit *Node) const;
+};
 
 class GCNIterativeScheduler : public ScheduleDAGMILive {
   using BaseClass = ScheduleDAGMILive;
@@ -48,6 +62,12 @@ public:
 
   void finalizeSchedule() override;
 
+  void computeDFSResult();
+
+  const SchedDFSResult2* getDFSResult() const { 
+    return static_cast<SchedDFSResult2*>(DFSResult);
+  }
+
 protected:
   using ScheduleRef = ArrayRef<const SUnit *>;
 
@@ -67,6 +87,8 @@ protected:
 
     // best schedule for the region so far (not scheduled yet)
     std::unique_ptr<TentativeSchedule> BestSchedule;
+
+    std::string getName(const LiveIntervals *LIS) const;
   };
 
   SpecificBumpPtrAllocator<Region> Alloc;
@@ -118,6 +140,8 @@ protected:
   void printSchedRP(raw_ostream &OS,
                     const GCNRegPressure &Before,
                     const GCNRegPressure &After) const;
+
+  void writeGraph(const Region &R);
 };
 
 } // end namespace llvm

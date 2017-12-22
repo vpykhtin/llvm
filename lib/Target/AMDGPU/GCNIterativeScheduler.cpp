@@ -31,10 +31,45 @@
 #include <memory>
 #include <type_traits>
 #include <vector>
+#include "llvm/CodeGen/ScheduleDAG.h"
+#include "llvm/CodeGen/ScheduleDFS.h"
+#include "llvm/Support/GraphWriter.h"
+#include "llvm/Support/Filesystem.h"
 
 using namespace llvm;
 
 #define DEBUG_TYPE "machine-scheduler"
+
+bool SchedDFSResult2::isParentTree(unsigned PotentailParentSubTreeID,
+                                   unsigned PotentialChildSubTreeID) const {
+  auto ID = PotentialChildSubTreeID;
+  assert(ID != SchedDFSResult::InvalidSubtreeID);
+  unsigned ParentID;
+  while ((ParentID = DFSTreeData[ID].ParentTreeID) != SchedDFSResult::InvalidSubtreeID) {
+    if (ParentID == PotentailParentSubTreeID)
+      return true;
+    ID = ParentID;
+  }
+  return false;
+}
+
+unsigned SchedDFSResult2::getTopMostParentSubTreeID(const SUnit *Node) const {
+  auto ID = getSubtreeID(Node);
+  assert(ID != SchedDFSResult::InvalidSubtreeID);
+  unsigned ParentID;
+  while ((ParentID = DFSTreeData[ID].ParentTreeID) != SchedDFSResult::InvalidSubtreeID) {
+    ID = ParentID;
+  }
+  return ID;
+}
+
+bool SchedDFSResult2::isInTreeOrDescendant(const SUnit *Node,
+                                           unsigned SubTreeID) const {
+  auto ID = getSubtreeID(Node);
+  if (ID == SubTreeID)
+    return true;
+  return isParentTree(SubTreeID, ID);
+}
 
 namespace llvm {
 
@@ -139,6 +174,19 @@ void GCNIterativeScheduler::printSchedRP(raw_ostream &OS,
   After.print(OS, &ST);
 }
 #endif
+
+std::string GCNIterativeScheduler::Region::getName(const LiveIntervals *LIS)
+const {
+  assert(LIS);
+  std::string Name;
+  raw_string_ostream O(Name);
+  auto MF = getBB()->getParent();
+  O << "dag." << getBB()->getParent()->getName() 
+    << ".BB" << getBB()->getNumber() << '.'
+    << LIS->getInstructionIndex(*Begin) << '-'
+    << LIS->getInstructionIndex(*End);
+  return O.str();
+}
 
 // DAG builder helper
 class GCNIterativeScheduler::BuildDAG {
@@ -439,6 +487,13 @@ void GCNIterativeScheduler::sortRegionsByPressure(unsigned TargetOcc) {
   });
 }
 
+void GCNIterativeScheduler::computeDFSResult() {
+  delete DFSResult;
+  DFSResult = new SchedDFSResult2(8);
+  DFSResult->resize(SUnits.size());
+  DFSResult->compute(SUnits);
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // Legacy MaxOccupancy Strategy
 
@@ -552,8 +607,14 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
       break;
 
     BuildDAG DAG(*R, *this);
-    const auto MinSchedule = makeMinRegSchedule(DAG.getTopRoots(), *this);
+    computeDFSResult();
+    DEBUG(writeGraph(*R));
+    //DEBUG(dumpSUs());
 
+    DEBUG(dbgs() << "\n=== Begin scheduling " << R->getName(LIS) << '\n');
+    const auto MinSchedule = makeMinRegSchedule(DAG.getTopRoots(), *this);
+    DEBUG(dbgs() << "\n=== End scheduling " << R->getName(LIS) << '\n');
+    
     const auto RP = getSchedulePressure(*R, MinSchedule);
     LLVM_DEBUG(if (R->MaxPressure.less(ST, RP, TgtOcc)) {
       dbgs() << "\nWarning: Pressure becomes worse after minreg!";
@@ -613,3 +674,119 @@ void GCNIterativeScheduler::scheduleILP(
   }
   MFI->limitOccupancy(FinalOccupancy);
 }
+
+#ifndef NDEBUG
+namespace llvm {
+
+template<>
+struct GraphTraits<GCNIterativeScheduler*> : GraphTraits<ScheduleDAG*> {
+};
+
+template<>
+class DOTGraphTraits<GCNIterativeScheduler*> : public DefaultDOTGraphTraits {
+  
+  mutable const GCNIterativeScheduler *DAG;
+
+public:
+  DOTGraphTraits(bool isSimple = false) : DefaultDOTGraphTraits(isSimple) {}
+
+  std::string getGraphName(const GCNIterativeScheduler *G) const {
+    // this is the first method called with graph avaliable
+    DAG = G;
+    return G->MF.getName();
+  }
+
+  static bool renderGraphFromBottomUp() {
+    return true;
+  }
+
+  bool isNodeHidden(const SUnit *Node) const {
+    if (Node->Succs.size() > 127)
+      return true;
+    
+    auto MI = Node->getInstr();
+    if (MI->getOpcode() == AMDGPU::S_MOV_B32) {
+      auto Op0 = MI->getOperand(0);
+      if (Op0.isReg() && Op0.getReg() == AMDGPU::M0)
+        return true;
+    }
+
+    auto DFS = DAG->getDFSResult();
+    if (!DFS) return true;
+   
+    return !DFS->isInTreeOrDescendant(Node, 16) &&
+           !DFS->isInTreeOrDescendant(Node, 17) &&
+           !DFS->isInTreeOrDescendant(Node, 23) &&
+           !DFS->isInTreeOrDescendant(Node, 24);
+  }
+
+  /// If you want to override the dot attributes printed for a particular
+  /// edge, override this method.
+  std::string getEdgeAttributes(const SUnit *Node,
+                                SUnitIterator EI,
+                                const ScheduleDAG *) const {
+    if (EI.isArtificialDep())
+      return "color=cyan,style=dashed";
+    else if (EI.isCtrlDep())
+      return "color=blue,style=dashed";
+
+    auto DFS = DAG->getDFSResult();
+    if (DFS) {
+      auto NodeTreeID = DFS->getSubtreeID(Node);
+      auto Pred = *EI;
+      auto PredTreeID = DFS->getSubtreeID(Pred);
+      if (NodeTreeID != PredTreeID)
+        return DFS->isParentTree(NodeTreeID, PredTreeID) ?
+          "color=green,style=bold":
+          "color=orange,style=bold";
+    }
+    return "";
+  }
+
+  std::string getNodeLabel(const SUnit *SU, const ScheduleDAG *) const {
+    std::string Str;
+    raw_string_ostream O(Str);
+    O << "SU:" << SU->NodeNum;
+    if (const SchedDFSResult *DFS = DAG->getDFSResult())
+      O << " I:" << DFS->getNumInstrs(SU);
+    return O.str();
+  }
+
+  std::string getNodeDescription(const SUnit *SU, const ScheduleDAG *) const {
+    return DAG->getGraphNodeLabel(SU);
+  }
+
+  std::string getNodeAttributes(const SUnit *N, const ScheduleDAG *) const {
+    std::string Str;
+    auto DFS = DAG->getDFSResult();
+    if (DFS) {
+      auto TopParent = DFS->getTopMostParentSubTreeID(N);
+      auto Curr = DFS->getSubtreeID(N);
+      Str += TopParent == Curr ? "style=\"bold,filled\"" : "style=\"filled\"";
+      Str += ", fillcolor = \"#";
+      Str += DOT::getColorString(TopParent);
+      Str += '"';
+    }
+    return Str;
+  }
+};
+
+void GCNIterativeScheduler::writeGraph(const Region &R) {
+  const auto Name = R.getName(LIS);
+  auto Filename = Name + ".dot";
+  for (auto &C : Filename)
+    if (C == ':')
+      C = '.';
+
+  std::error_code EC;
+  raw_fd_ostream FS(Filename, EC, sys::fs::OpenFlags::F_Text | sys::fs::OpenFlags::F_RW);
+  if (EC) {
+    errs() << "Error opening " << Filename  << " file: " << EC.message() << '\n';
+    return;
+  }
+  llvm::WriteGraph(FS, this, false, "Scheduling-Units Graph for " + Name);
+}
+
+} // end namespace llvm
+
+#endif // NDEBUG

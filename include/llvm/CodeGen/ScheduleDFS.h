@@ -64,6 +64,7 @@ struct ILPValue {
 
 /// Compute the values of each DAG node for various metrics during DFS.
 class SchedDFSResult {
+protected:
   friend class SchedDFSImpl;
 
   static const unsigned InvalidSubtreeID = ~0u;
