@@ -8586,6 +8586,39 @@ static void tryToElideArgumentCopy(
   }
 }
 
+static bool IsAMDGPUKernel(const Function &F) {
+  return F.getCallingConv() == CallingConv::AMDGPU_KERNEL;
+}
+
+static SmallVector<unsigned, 4> OriginalAlignments(
+  const Function &F,
+  const TargetLowering &TLI,
+  const DataLayout &DL,
+  Type *Ty,
+  SmallVector<unsigned, 4> Align = {}) {
+  if (StructType *STy = dyn_cast<StructType>(Ty)) {
+    auto First = Align.size();
+    const StructLayout *SL = DL.getStructLayout(STy);
+
+    for (auto &&E : STy->elements()) {
+      Align = OriginalAlignments(F, TLI, DL, E, std::move(Align));
+    }
+    if (IsAMDGPUKernel(F)) Align[First] = SL->getAlignment();
+  }
+  else if (ArrayType *ATy = dyn_cast<ArrayType>(Ty)) {
+    Type *ETy = ATy->getArrayElementType();
+    SmallVector<unsigned, 4> Tmp = OriginalAlignments(F, TLI, DL, ETy);
+
+    auto N = ATy->getArrayNumElements();
+    while (N--) Align.insert(Align.end(), Tmp.begin(), Tmp.end());
+  }
+  else if (!Ty->isVoidTy()) {
+    Align.push_back(TLI.getABIAlignmentForCallingConv(Ty, DL));
+  }
+
+  return Align;
+}
+
 void SelectionDAGISel::LowerArguments(const Function &F) {
   SelectionDAG &DAG = SDB->DAG;
   SDLoc dl = SDB->getCurSDLoc();
@@ -8619,6 +8652,8 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
     unsigned ArgNo = Arg.getArgNo();
     SmallVector<EVT, 4> ValueVTs;
     ComputeValueVTs(*TLI, DAG.getDataLayout(), Arg.getType(), ValueVTs);
+    SmallVector<unsigned, 4> Alignments =
+      OriginalAlignments(F, *TLI, DL, Arg.getType());
     bool isArgValueUsed = !Arg.use_empty();
     unsigned PartBase = 0;
     Type *FinalType = Arg.getType();
@@ -8629,14 +8664,12 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
     for (unsigned Value = 0, NumValues = ValueVTs.size();
          Value != NumValues; ++Value) {
       EVT VT = ValueVTs[Value];
-      Type *ArgTy = VT.getTypeForEVT(*DAG.getContext());
       ISD::ArgFlagsTy Flags;
 
-      // Certain targets (such as MIPS), may have a different ABI alignment
-      // for a type depending on the context. Give the target a chance to
-      // specify the alignment it wants.
-      unsigned OriginalAlignment =
-          TLI->getABIAlignmentForCallingConv(ArgTy, DL);
+      // Certain targets (such as MIPS or AMDGPU), may have a different ABI
+      // alignment for a type depending on the context. Give the target a chance
+      // to specify the alignment it wants.
+      unsigned OriginalAlignment = Alignments[Value];
 
       if (Arg.hasAttribute(Attribute::ZExt))
         Flags.setZExt();
