@@ -37,6 +37,9 @@ public:
                     unsigned PotentialChildSubTreeID) const;
 
   unsigned getTopMostParentSubTreeID(const SUnit *Node) const;
+  unsigned getTopMostParentSubTreeID(unsigned ID) const;
+
+  friend void writeSubtreeGraph(const SchedDFSResult2 &R, StringRef Name);
 };
 
 class GCNIterativeScheduler : public ScheduleDAGMILive {
@@ -68,6 +71,8 @@ public:
     return static_cast<SchedDFSResult2*>(DFSResult);
   }
 
+  const auto &getTopo() const { return Topo; }
+
 protected:
   using ScheduleRef = ArrayRef<const SUnit *>;
 
@@ -89,6 +94,8 @@ protected:
     std::unique_ptr<TentativeSchedule> BestSchedule;
 
     std::string getName(const LiveIntervals *LIS) const;
+
+    const MachineBasicBlock *getBB() const { return Begin->getParent(); }
   };
 
   SpecificBumpPtrAllocator<Region> Alloc;
@@ -132,6 +139,7 @@ protected:
   void scheduleLegacyMaxOccupancy(bool TryMaximizeOccupancy = true);
   void scheduleMinReg(bool force = false);
   void scheduleILP(bool TryMaximizeOccupancy = true);
+  void scheduleGroup();
 
   void printRegions(raw_ostream &OS) const;
   void printSchedResult(raw_ostream &OS,
@@ -141,7 +149,7 @@ protected:
                     const GCNRegPressure &Before,
                     const GCNRegPressure &After) const;
 
-  void writeGraph(const Region &R);
+  void writeGraph(StringRef Name);
 };
 
 } // end namespace llvm

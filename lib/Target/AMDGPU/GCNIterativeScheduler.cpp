@@ -54,7 +54,11 @@ bool SchedDFSResult2::isParentTree(unsigned PotentailParentSubTreeID,
 }
 
 unsigned SchedDFSResult2::getTopMostParentSubTreeID(const SUnit *Node) const {
-  auto ID = getSubtreeID(Node);
+  return getTopMostParentSubTreeID(getSubtreeID(Node));
+}
+
+unsigned SchedDFSResult2::getTopMostParentSubTreeID(unsigned SubTreeID) const {
+  auto ID = SubTreeID;
   assert(ID != SchedDFSResult::InvalidSubtreeID);
   unsigned ParentID;
   while ((ParentID = DFSTreeData[ID].ParentTreeID) != SchedDFSResult::InvalidSubtreeID) {
@@ -180,7 +184,6 @@ const {
   assert(LIS);
   std::string Name;
   raw_string_ostream O(Name);
-  auto MF = getBB()->getParent();
   O << "dag." << getBB()->getParent()->getName() 
     << ".BB" << getBB()->getNumber() << '.'
     << LIS->getInstructionIndex(*Begin) << '-'
@@ -608,7 +611,9 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
 
     BuildDAG DAG(*R, *this);
     computeDFSResult();
-    DEBUG(writeGraph(*R));
+    //DEBUG(writeGraph(R->getName(LIS)));
+    DEBUG(writeSubtreeGraph(*static_cast<SchedDFSResult2*>(DFSResult), R->getName(LIS)));
+
     //DEBUG(dumpSUs());
 
     DEBUG(dbgs() << "\n=== Begin scheduling " << R->getName(LIS) << '\n');
@@ -771,12 +776,15 @@ public:
   }
 };
 
-void GCNIterativeScheduler::writeGraph(const Region &R) {
-  const auto Name = R.getName(LIS);
-  auto Filename = Name + ".dot";
-  for (auto &C : Filename)
+static void fixFilename(std::string &Name) {
+  for (auto &C : Name)
     if (C == ':')
       C = '.';
+}
+
+void GCNIterativeScheduler::writeGraph(StringRef Name) {
+  auto Filename = std::string(Name) + ".dot";
+  fixFilename(Filename);
 
   std::error_code EC;
   raw_fd_ostream FS(Filename, EC, sys::fs::OpenFlags::F_Text | sys::fs::OpenFlags::F_RW);
@@ -786,6 +794,46 @@ void GCNIterativeScheduler::writeGraph(const Region &R) {
   }
   llvm::WriteGraph(FS, this, false, "Scheduling-Units Graph for " + Name);
 }
+
+void writeSubtreeGraph(const SchedDFSResult2 &R, StringRef Name) {
+  auto Filename = std::string(Name) + ".subtrees.dot";
+  fixFilename(Filename);
+
+  std::error_code EC;
+  raw_fd_ostream FS(Filename, EC, sys::fs::OpenFlags::F_Text | sys::fs::OpenFlags::F_RW);
+  if (EC) {
+    errs() << "Error opening " << Filename << " file: " << EC.message() << '\n';
+    return;
+  }
+
+  auto &O = FS;
+  O << "digraph \"" << DOT::EscapeString(Name) << "\" {\n";
+
+  for (size_t TreeID = 0, E = R.DFSTreeData.size(); TreeID < E; ++TreeID) {
+    const auto &TD = R.DFSTreeData[TreeID];
+    O << "\tSubtree" << TreeID
+      << " [shape = record, style = \"filled\""
+      << ", fillcolor = \"#" << DOT::getColorString(R.getTopMostParentSubTreeID(TreeID)) << '"'
+      << ", label = \"{Subtree " << TreeID << "|SICount=" << TD.SubInstrCount
+      << "}\"];\n";
+    if (TD.ParentTreeID != SchedDFSResult::InvalidSubtreeID) {
+      O << "\tSubtree" << TreeID << " -> "
+        << "Subtree" << TD.ParentTreeID << "[color=green,style=bold];\n";
+    }
+  }
+
+#if 0
+  for (size_t TreeID = 0, E = R.SubtreeConnections.size(); TreeID < E; ++TreeID) {
+    for (const auto &C : R.SubtreeConnections[TreeID]) {
+      O << "\tSubtree" << TreeID << " -> "
+        << "Subtree" << C.TreeID << "[color=orange,style=bold];\n";
+    }
+  }
+#endif
+
+  O << "}\n";
+}
+
 
 } // end namespace llvm
 
