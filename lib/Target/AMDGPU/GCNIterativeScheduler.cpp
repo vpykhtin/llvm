@@ -349,11 +349,19 @@ GCNIterativeScheduler::getSchedulePressure(const Region &R,
   return RPTracker.moveMaxPressure();
 }
 
+void GCNIterativeScheduler::startBlock(MachineBasicBlock *BB) { // overriden
+  removeM0Defs(*BB);
+}
+
+void GCNIterativeScheduler::finishBlock() { // overriden
+  // do nothing
+}
+
 void GCNIterativeScheduler::enterRegion(MachineBasicBlock *BB, // overriden
                                         MachineBasicBlock::iterator Begin,
                                         MachineBasicBlock::iterator End,
                                         unsigned NumRegionInstrs) {
-  BaseClass::enterRegion(BB, Begin, End, NumRegionInstrs);
+  //BaseClass::enterRegion(BB, Begin, End, NumRegionInstrs);
   if (NumRegionInstrs > 2) {
     Regions.push_back(
       new (Alloc.Allocate())
@@ -362,8 +370,13 @@ void GCNIterativeScheduler::enterRegion(MachineBasicBlock *BB, // overriden
   }
 }
 
+void GCNIterativeScheduler::exitRegion() { // overriden
+  // do nothing
+}
+
 void GCNIterativeScheduler::schedule() { // overriden
   // do nothing
+#if 0  
   LLVM_DEBUG(printLivenessInfo(dbgs(), RegionBegin, RegionEnd, LIS);
              if (!Regions.empty() && Regions.back()->Begin == RegionBegin) {
                dbgs() << "Max RP: ";
@@ -371,6 +384,7 @@ void GCNIterativeScheduler::schedule() { // overriden
                    dbgs(), &MF.getSubtarget<GCNSubtarget>());
              } dbgs()
              << '\n';);
+#endif
 }
 
 void GCNIterativeScheduler::finalizeSchedule() { // overriden
@@ -382,6 +396,9 @@ void GCNIterativeScheduler::finalizeSchedule() { // overriden
   case SCHEDULE_LEGACYMAXOCCUPANCY: scheduleLegacyMaxOccupancy(); break;
   case SCHEDULE_ILP: scheduleILP(false); break;
   }
+  for (auto &BB : MF)
+    restoreM0Defs(BB);
+  clearM0Map();
 }
 
 // Detach schedule from SUnits and interleave it with debug values.
@@ -496,6 +513,56 @@ void GCNIterativeScheduler::computeDFSResult() {
   DFSResult = new SchedDFSResult2(8);
   DFSResult->resize(SUnits.size());
   DFSResult->compute(SUnits);
+}
+
+void GCNIterativeScheduler::removeM0Defs(MachineBasicBlock &BB) {
+  DenseMap<int64_t, const MachineInstr*> M0Def;
+  const MachineInstr *CurM0Def = nullptr;
+  for (auto I = BB.begin(), E = BB.end(); I != E;) {
+    auto &MI = *I++;
+    if (MI.getOpcode() == AMDGPU::S_MOV_B32 &&
+      MI.getOperand(0).getReg() == AMDGPU::M0) {
+      const auto &Op1 = MI.getOperand(1);
+      if (Op1.isImm()) {
+        auto R = M0Def.try_emplace(Op1.getImm(), &MI);
+        if (CurM0Def)
+          R.second ? MI.removeFromParent() : MI.eraseFromParent();
+        CurM0Def = R.first->second;
+      }
+      else
+        CurM0Def = nullptr;
+      continue;
+    }
+
+    if (CurM0Def && MI.findRegisterUseOperand(AMDGPU::M0))
+      M0Map[&MI] = CurM0Def;
+  }
+}
+
+void GCNIterativeScheduler::restoreM0Defs(MachineBasicBlock &BB) {
+  const MachineInstr *CurM0Def = nullptr;
+  for (auto &MI : BB) {
+    if (MI.getOpcode() == AMDGPU::S_MOV_B32 &&
+      MI.getOperand(0).getReg() == AMDGPU::M0 &&
+      MI.getOperand(0).isImm()) {
+      CurM0Def = &MI;
+      continue;
+    }
+
+    auto I = M0Map.find(&MI);
+    if (I != M0Map.end() && I->second != CurM0Def) {
+      CurM0Def = I->second;
+      BB.insert(&MI, MF.CloneMachineInstr(CurM0Def));
+    }
+  }
+}
+
+void GCNIterativeScheduler::clearM0Map() {
+  /*for (auto &P : M0Map) {
+    auto *MI = P.second;
+  }*/
+  // TODO: erase unused MIs
+  M0Map.clear();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

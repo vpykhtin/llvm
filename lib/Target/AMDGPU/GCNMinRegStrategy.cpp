@@ -508,6 +508,8 @@ unsigned GCNMinRegScheduler2::getNumSucc(const SUnit *SU, const Root &R) const {
 }
 
 void GCNMinRegScheduler2::schedulePseudoTree(Root &R) {
+  if (R.List.size() < 2)
+    return;
 #ifndef NDEBUG
   auto PrevSize = R.List.size();
 #endif
@@ -532,7 +534,7 @@ void GCNMinRegScheduler2::schedulePseudoTree(Root &R) {
       auto &PredLSU = getLSU(PredSU);
       if (PredLSU.Parent != &R || --NumSucc[PredSU->NodeNum])
         continue;
-      DEBUG(PredSU->getInstr()->print(dbgs()));
+      //DEBUG(PredSU->getInstr()->print(dbgs()));
       R.List.push_back(PredLSU);
       DFS.follow(PredSU);
     }
@@ -553,7 +555,7 @@ void GCNMinRegScheduler2::Root::dump(raw_ostream &O) const {
 }
 
 void GCNMinRegScheduler2::writeGraph(StringRef Name) const {
-  auto Filename = std::string(Name); // +".subtrees.dot";
+  auto Filename = std::string(Name);
 
   std::error_code EC;
   raw_fd_ostream FS(Filename, EC, sys::fs::OpenFlags::F_Text | sys::fs::OpenFlags::F_RW);
@@ -562,24 +564,30 @@ void GCNMinRegScheduler2::writeGraph(StringRef Name) const {
     return;
   }
 
+  DenseSet<unsigned> Expand = { 3792, 3802 };
+
   auto &O = FS;
   O << "digraph \"" << DOT::EscapeString(Name) << "\" {\n";
 
   for (auto &R : Roots) {
     auto TreeID = R.getBottomSU()->NodeNum;
-    O << "\tSubtree" << TreeID
-      << " [shape = record, style = \"filled\""
-      << ", fillcolor = \"#" << DOT::getColorString(TreeID) << '"'
-      << ", label = \"{Subtree " << TreeID
-      << "| InstrCount = " << R.List.size()
-      << "}\"];\n";
-    for(const auto &P: R.Preds) {
-      O << "\tSubtree" << TreeID << " -> "
-        << "Subtree" << P.first->getID()
-        << "[" // color=green,style=bold
-        << "weight=" << P.second.size()
-        << ",label=" << P.second.size()
-        << "];\n";
+    if (!Expand.count(TreeID)) {
+      O << "\tSubtree" << TreeID
+        << " [shape = record, style = \"filled\""
+        << ", fillcolor = \"#" << DOT::getColorString(TreeID) << '"'
+        << ", label = \"{Subtree " << TreeID
+        << "| InstrCount = " << R.List.size()
+        << "}\"];\n";
+      for (const auto &P : R.Preds) {
+        O << "\tSubtree" << TreeID << " -> "
+          << "Subtree" << P.first->getID()
+          << "[" // color=green,style=bold
+          << "weight=" << P.second.size()
+          << ",label=" << P.second.size()
+          << "];\n";
+      }
+    } else {
+
     }
   }
 

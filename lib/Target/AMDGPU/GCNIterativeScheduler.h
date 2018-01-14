@@ -58,10 +58,15 @@ public:
 
   void schedule() override;
 
+  void startBlock(MachineBasicBlock *BB) override;
+  void finishBlock() override;
+
   void enterRegion(MachineBasicBlock *BB,
                    MachineBasicBlock::iterator Begin,
                    MachineBasicBlock::iterator End,
                    unsigned RegionInstrs) override;
+
+  void exitRegion() override;
 
   void finalizeSchedule() override;
 
@@ -104,6 +109,7 @@ protected:
   MachineSchedContext *Context;
   const StrategyKind Strategy;
   mutable GCNUpwardRPTracker UPTracker;
+  DenseMap<const MachineInstr*, const MachineInstr*> M0Map;
 
   class BuildDAG;
   class OverrideLegacyStrategy;
@@ -139,7 +145,10 @@ protected:
   void scheduleLegacyMaxOccupancy(bool TryMaximizeOccupancy = true);
   void scheduleMinReg(bool force = false);
   void scheduleILP(bool TryMaximizeOccupancy = true);
-  void scheduleGroup();
+
+  void removeM0Defs(MachineBasicBlock &BB);
+  void restoreM0Defs(MachineBasicBlock &BB);
+  void clearM0Map();
 
   void printRegions(raw_ostream &OS) const;
   void printSchedResult(raw_ostream &OS,
