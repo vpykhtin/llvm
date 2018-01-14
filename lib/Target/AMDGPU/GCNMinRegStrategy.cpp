@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "GCNIterativeScheduler.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -16,6 +17,10 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include "llvm/Support/GraphWriter.h"
+#include "llvm/Support/Filesystem.h"
+
 #include <cassert>
 #include <cstdint>
 #include <limits>
@@ -24,6 +29,8 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "machine-scheduler"
+
+#if 0
 
 namespace {
 
@@ -273,13 +280,320 @@ GCNMinRegScheduler::schedule(ArrayRef<const SUnit*> TopRoots,
 
   return Schedule;
 }
+#endif
+
+#if 0
+/// \brief Order nodes by the ILP metric.
+struct MinOrder {
+  const SchedDFSResult2 *DFSResult = nullptr;
+  const BitVector *ScheduledTrees = nullptr;
+
+  MinOrder() {}
+
+  /// \brief Apply a less-than relation on node priority.
+  ///
+  /// (Return true if A comes after B in the Q.)
+  bool operator()(const SUnit *A, const SUnit *B) const {
+    unsigned SchedTreeA = DFSResult->getSubtreeID(A);
+    unsigned SchedTreeB = DFSResult->getSubtreeID(B);
+    if (SchedTreeA != SchedTreeB) {
+      // Unscheduled trees have lower priority.
+      if (ScheduledTrees->test(SchedTreeA) != ScheduledTrees->test(SchedTreeB))
+        return ScheduledTrees->test(SchedTreeB);
+
+      // Trees with shallower connections have have lower priority.
+      if (DFSResult->getSubtreeLevel(SchedTreeA)
+        != DFSResult->getSubtreeLevel(SchedTreeB)) {
+        return DFSResult->getSubtreeLevel(SchedTreeA)
+          < DFSResult->getSubtreeLevel(SchedTreeB);
+      }
+    }
+    return DFSResult->getILP(A) < DFSResult->getILP(B);
+  }
+};
+
+class GCNMinRegScheduler2  {
+  std::unique_ptr<SchedDFSResult2> DFSResult;
+
+  MinOrder Cmp;
+  std::vector<const SUnit*> ReadyQ;
+
+public:
+  GCNMinRegScheduler2(const ScheduleDAG &DAG)
+    : DFSResult(new SchedDFSResult2(8)) {
+    DFSResult->resize(DAG.SUnits.size());
+    DFSResult->compute(DAG.SUnits);
+    Cmp.DFSResult = DFSResult.get();
+  }
+
+  void registerRoots() {
+    // Restore the heap in ReadyQ with the updated DFS results.
+    std::make_heap(ReadyQ.begin(), ReadyQ.end(), Cmp);
+  }
+
+  /// Implement MachineSchedStrategy interface.
+  /// -----------------------------------------
+
+  /// Callback to select the highest priority node from the ready Q.
+  const SUnit *pickNode() {
+    if (ReadyQ.empty()) return nullptr;
+    std::pop_heap(ReadyQ.begin(), ReadyQ.end(), Cmp);
+    auto *SU = ReadyQ.back();
+    ReadyQ.pop_back();
+    return SU;
+  }
+
+  /// \brief Scheduler callback to notify that a new subtree is scheduled.
+  void scheduleTree(unsigned SubtreeID) {
+    std::make_heap(ReadyQ.begin(), ReadyQ.end(), Cmp);
+  }
+
+  /// Callback after a node is scheduled. Mark a newly scheduled tree, notify
+  /// DFSResults, and resort the priority Q.
+  void schedNode(SUnit *SU, bool IsTopNode) {
+    assert(!IsTopNode && "SchedDFSResult needs bottom-up");
+  }
+
+  void releaseBottomNode(SUnit *SU) {
+    ReadyQ.push_back(SU);
+    std::push_heap(ReadyQ.begin(), ReadyQ.end(), Cmp);
+  }
+};
+#endif
+
+namespace {
+
+class GCNMinRegScheduler2 {
+
+  struct Root;
+
+  struct LinkedSU : ilist_node<LinkedSU> {
+    const SUnit * const SU;
+    Root *Parent = nullptr;
+
+    LinkedSU(const SUnit &SU_) : SU(&SU_) {}
+  };
+
+  struct Root {
+    simple_ilist<LinkedSU> List;
+    DenseMap<Root*, DenseSet<unsigned>> Preds;
+
+    Root(LinkedSU &Bot) { add(Bot); }
+
+    void add(LinkedSU &LSU) {
+      List.push_back(LSU);
+      LSU.Parent = this;
+    }
+
+    const SUnit *getBottomSU() const { return List.front().SU; }
+
+    unsigned getID() const { return getBottomSU()->NodeNum; }
+
+    void dump(raw_ostream &O) const;
+  };
+
+  std::vector<LinkedSU> LSUs;
+  std::vector<Root> Roots;
+
+  LinkedSU &getLSU(const SUnit *SU) {
+    assert(!SU->isBoundaryNode());
+    return LSUs[SU->NodeNum];
+  }
+
+  const LinkedSU &getLSU(const SUnit *SU) const {
+    return const_cast<GCNMinRegScheduler2*>(this)->getLSU(SU);
+  }
+
+public:
+  GCNMinRegScheduler2(ArrayRef<const SUnit*> BotRoots,
+                      const ScheduleDAG &DAG)
+    : LSUs(DAG.SUnits.begin(), DAG.SUnits.end()) {
+    Roots.reserve(BotRoots.size());
+    for (auto *SU : BotRoots) {
+      Roots.emplace_back(getLSU(SU));
+    }
+  }
+
+  std::vector<const SUnit*> schedule();
+
+  void writeGraph(StringRef Name) const;
+
+private:
+  void discoverPseudoTree(Root &R);
+  void schedulePseudoTree(Root &R);
+
+  unsigned getNumSucc(const SUnit *SU, const Root &R) const;
+};
+
+std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
+  // sort deepest first
+  std::sort(Roots.begin(), Roots.end(),
+    [=](const Root &R1, const Root &R2) ->bool {
+    return R1.getBottomSU()->getDepth() > R2.getBottomSU()->getDepth();
+  });
+
+  for (auto &R : Roots) {
+    discoverPseudoTree(R);
+    //schedulePseudoTree(R);
+    DEBUG(R.dump(dbgs()));
+  }
+
+  DEBUG(writeGraph("subtrees.dot"));
+
+  std::vector<const SUnit*> Res;
+  for (auto &LSU : LSUs)
+    Res.push_back(LSU.SU);
+  return Res;
+}
+
+void GCNMinRegScheduler2::discoverPseudoTree(Root &R) {
+  std::vector<const SUnit*> Worklist;
+  Worklist.push_back(R.getBottomSU());
+
+  do {
+    auto *C = Worklist.back();
+    Worklist.pop_back();
+
+    for (auto &P : make_range(C->Preds.rbegin(), C->Preds.rend())) {
+      //if (!P.isAssignedRegDep()) continue;
+      if (P.isWeak()) continue;
+
+      auto &LSU = getLSU(P.getSUnit());
+      if (!LSU.Parent) {
+        R.add(LSU);
+        Worklist.push_back(LSU.SU);
+      } else if (LSU.Parent != &R) { // cross edge detected
+        R.Preds[LSU.Parent].insert(P.isAssignedRegDep() ? P.getReg() : 0);
+      }
+    }
+  } while (!Worklist.empty());
+}
+
+/// Manage the stack used by a reverse depth-first search over the DAG.
+class SchedDAGReverseDFS {
+  std::vector<std::pair<const SUnit *, SUnit::const_pred_iterator>> DFSStack;
+
+public:
+  bool isComplete() const { return DFSStack.empty(); }
+
+  void follow(const SUnit *SU) {
+    DFSStack.push_back(std::make_pair(SU, SU->Preds.begin()));
+  }
+  void advance() { ++DFSStack.back().second; }
+
+  const SDep *backtrack() {
+    DFSStack.pop_back();
+    return DFSStack.empty() ? nullptr : std::prev(DFSStack.back().second);
+  }
+
+  const SUnit *getCurr() const { return DFSStack.back().first; }
+
+  SUnit::const_pred_iterator getPred() const { return DFSStack.back().second; }
+
+  SUnit::const_pred_iterator getPredEnd() const {
+    return getCurr()->Preds.end();
+  }
+};
+
+// returns the number of SU successors belonging to R
+unsigned GCNMinRegScheduler2::getNumSucc(const SUnit *SU, const Root &R) const {
+  assert(getLSU(SU).Parent == &R);
+  unsigned NumSucc = 0;
+  for (const auto &SDep : SU->Succs) {
+    const auto *SuccSU = SDep.getSUnit();
+    if (!SDep.isWeak() && !SuccSU->isBoundaryNode() && getLSU(SuccSU).Parent == &R)
+      ++NumSucc;
+  }
+  return NumSucc;
+}
+
+void GCNMinRegScheduler2::schedulePseudoTree(Root &R) {
+#ifndef NDEBUG
+  auto PrevSize = R.List.size();
+#endif
+  std::vector<unsigned> NumSucc(LSUs.size());
+  auto Tail = make_range(++R.List.begin(), R.List.end());
+  for (auto &LSU : Tail)
+    NumSucc[LSU.SU->NodeNum] = getNumSucc(LSU.SU, R);
+
+  R.List.erase(Tail.begin(), Tail.end());
+
+  SchedDAGReverseDFS DFS;
+  DFS.follow(R.getBottomSU());
+  DEBUG(R.getBottomSU()->getInstr()->print(dbgs()));
+  do {
+    // Traverse the leftmost path as far as possible.
+    while (DFS.getPred() != DFS.getPredEnd()) {
+      const auto &Pred = *DFS.getPred();
+      const auto *PredSU = Pred.getSUnit();
+      DFS.advance();
+      if (PredSU->isBoundaryNode() /* ||Pred.isWeak()*/)
+        continue;
+      auto &PredLSU = getLSU(PredSU);
+      if (PredLSU.Parent != &R || --NumSucc[PredSU->NodeNum])
+        continue;
+      DEBUG(PredSU->getInstr()->print(dbgs()));
+      R.List.push_back(PredLSU);
+      DFS.follow(PredSU);
+    }
+    DFS.backtrack();
+  } while (!DFS.isComplete());
+
+  assert(R.List.size() == PrevSize);
+}
+///////////////////////////////////////////////////////////////////////////////
+// Dumping
+
+void GCNMinRegScheduler2::Root::dump(raw_ostream &O) const {
+  O << "Subgraph " << getBottomSU()->NodeNum << '\n';
+  for (const auto &LSU : make_range(List.rbegin(), List.rend())) {
+    LSU.SU->getInstr()->print(O);
+  }
+  O << '\n';
+}
+
+void GCNMinRegScheduler2::writeGraph(StringRef Name) const {
+  auto Filename = std::string(Name); // +".subtrees.dot";
+
+  std::error_code EC;
+  raw_fd_ostream FS(Filename, EC, sys::fs::OpenFlags::F_Text | sys::fs::OpenFlags::F_RW);
+  if (EC) {
+    errs() << "Error opening " << Filename << " file: " << EC.message() << '\n';
+    return;
+  }
+
+  auto &O = FS;
+  O << "digraph \"" << DOT::EscapeString(Name) << "\" {\n";
+
+  for (auto &R : Roots) {
+    auto TreeID = R.getBottomSU()->NodeNum;
+    O << "\tSubtree" << TreeID
+      << " [shape = record, style = \"filled\""
+      << ", fillcolor = \"#" << DOT::getColorString(TreeID) << '"'
+      << ", label = \"{Subtree " << TreeID
+      << "| InstrCount = " << R.List.size()
+      << "}\"];\n";
+    for(const auto &P: R.Preds) {
+      O << "\tSubtree" << TreeID << " -> "
+        << "Subtree" << P.first->getID()
+        << "[" // color=green,style=bold
+        << "weight=" << P.second.size()
+        << ",label=" << P.second.size()
+        << "];\n";
+    }
+  }
+
+  O << "}\n";
+}
+
+}
 
 namespace llvm {
 
 std::vector<const SUnit*> makeMinRegSchedule(ArrayRef<const SUnit*> TopRoots,
+                                             ArrayRef<const SUnit*> BotRoots,
                                              const ScheduleDAG &DAG) {
-  GCNMinRegScheduler S;
-  return S.schedule(TopRoots, DAG);
+  return GCNMinRegScheduler2(BotRoots, DAG).schedule();
 }
 
 } // end namespace llvm
