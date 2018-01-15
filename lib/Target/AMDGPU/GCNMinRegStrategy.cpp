@@ -375,10 +375,11 @@ class GCNMinRegScheduler2 {
   };
 
   struct Root {
+    unsigned ID;
     simple_ilist<LinkedSU> List;
     DenseMap<Root*, DenseSet<unsigned>> Preds;
 
-    Root(LinkedSU &Bot) { add(Bot); }
+    Root(unsigned ID_, LinkedSU &Bot) : ID(ID_) { add(Bot); }
 
     void add(LinkedSU &LSU) {
       List.push_back(LSU);
@@ -386,8 +387,6 @@ class GCNMinRegScheduler2 {
     }
 
     const SUnit *getBottomSU() const { return List.front().SU; }
-
-    unsigned getID() const { return getBottomSU()->NodeNum; }
 
     void dump(raw_ostream &O) const;
   };
@@ -409,8 +408,9 @@ public:
                       const ScheduleDAG &DAG)
     : LSUs(DAG.SUnits.begin(), DAG.SUnits.end()) {
     Roots.reserve(BotRoots.size());
+    unsigned TreeID = 1;
     for (auto *SU : BotRoots) {
-      Roots.emplace_back(getLSU(SU));
+      Roots.emplace_back(TreeID++, getLSU(SU));
     }
   }
 
@@ -423,6 +423,12 @@ private:
   void schedulePseudoTree(Root &R);
 
   unsigned getNumSucc(const SUnit *SU, const Root &R) const;
+
+  static bool isExpanded(const Root &R);
+  static void writeSubtree(raw_ostream &O, const Root &R);
+  void writeExpandedSubtree(raw_ostream &O, const Root &R) const;
+  void writeLinks(raw_ostream &O, const Root &R) const;
+  void writeLinksExpanded(raw_ostream &O, const Root &R) const;
 };
 
 std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
@@ -534,7 +540,6 @@ void GCNMinRegScheduler2::schedulePseudoTree(Root &R) {
       auto &PredLSU = getLSU(PredSU);
       if (PredLSU.Parent != &R || --NumSucc[PredSU->NodeNum])
         continue;
-      //DEBUG(PredSU->getInstr()->print(dbgs()));
       R.List.push_back(PredLSU);
       DFS.follow(PredSU);
     }
@@ -554,6 +559,132 @@ void GCNMinRegScheduler2::Root::dump(raw_ostream &O) const {
   O << '\n';
 }
 
+bool GCNMinRegScheduler2::isExpanded(const Root &R) {
+  static const DenseSet<unsigned> Expand = 
+    //{ 1, 2 };
+    { 1, 2, 45, 46 };
+
+  return Expand.count(R.ID) > 0 || (R.List.size() <= 2);
+}
+
+static bool isSUHidden(const SUnit &SU) {
+  if (SU.isBoundaryNode())
+    return true;
+
+  //if (SU.Succs.size() > 127)
+  //  return true;
+
+  auto MI = SU.getInstr();
+  if (MI->getOpcode() == AMDGPU::S_MOV_B32) {
+    auto Op0 = MI->getOperand(0);
+    if (Op0.isReg() && Op0.getReg() == AMDGPU::M0)
+      return true;
+  }
+  return false;
+}
+
+static const char *getDepColor(SDep::Kind K) {
+  switch (K) {
+  case SDep::Anti: return "[color=green]";
+  case SDep::Output: return "[color=blue]";
+  case SDep::Order: return "[color=red]";
+  default:;
+  }
+  return "";
+}
+
+void GCNMinRegScheduler2::writeSubtree(raw_ostream &O, const Root &R) {
+  auto TreeID = R.ID;
+  O << "\tSubtree" << TreeID
+    << " [shape = record, style = \"filled\""
+    << ", fillcolor = \"#" << DOT::getColorString(TreeID) << '"'
+    << ", label = \"{Subtree " << TreeID
+    << "| InstrCount = " << R.List.size()
+    << "}\"];\n";
+}
+
+void GCNMinRegScheduler2::writeLinks(raw_ostream &O, const Root &R) const {
+  for (const auto &P : R.Preds) {
+    O << "\tSubtree" << R.ID << " -> ";
+    auto &PredR = *P.first;
+    if (isExpanded(PredR))
+      O << "SU" << PredR.getBottomSU()->NodeNum;
+    else
+      O << "Subtree" << PredR.ID;
+    O << "["
+      << "weight=" << P.second.size()
+      << ",label=" << P.second.size()
+      << "];\n";
+  }
+}
+
+static void writeSUtoPredSULink(raw_ostream &O, const SUnit &SU, const SDep &Pred) {
+  if (Pred.getKind() == SDep::Order &&
+    Pred.getSUnit()->Succs.size() > 5 &&
+    abs((int)(SU.getHeight() - Pred.getSUnit()->getHeight())) > 10)
+    return;
+
+  O << "\tSU" << SU.NodeNum
+    << " -> SU" << Pred.getSUnit()->NodeNum
+    << getDepColor(Pred.getKind())
+    << ";\n";
+}
+
+void GCNMinRegScheduler2::writeExpandedSubtree(raw_ostream &O, const Root &R) const {
+  auto TreeID = R.ID;
+  O << "\tsubgraph cluster_Subtree" << TreeID << " {\n";
+  O << "\t\tlabel = \"Subtree" << TreeID << "\";\n";
+  // write SUs
+  for (const auto &LSU : R.List) {
+    auto &SU = *LSU.SU;
+    if (isSUHidden(SU))
+      continue;
+    O << "\t\t";
+    O << "SU" << SU.NodeNum
+      << " [shape = record, style = \"filled\""
+      //<< ", rank = " << SU.getHeight()
+      << ", label = \"{SU" << SU.NodeNum << '|';
+    SU.getInstr()->print(O, /*SkipOpers=*/true);
+    O << "}\"];\n";
+  }
+  // write inner edges
+  for (const auto &LSU : R.List) {
+    auto &SU = *LSU.SU;
+    if (isSUHidden(SU))
+      continue;
+    for (const auto &Pred : SU.Preds) {
+      if (Pred.isWeak() ||
+          isSUHidden(*Pred.getSUnit()) ||
+          getLSU(Pred.getSUnit()).Parent != &R)
+        continue;
+      O << '\t';
+      writeSUtoPredSULink(O, SU, Pred);
+    }
+  }
+  O << "\t}\n";
+}
+
+void GCNMinRegScheduler2::writeLinksExpanded(raw_ostream &O, const Root &R) const {
+  for (const auto &LSU : R.List) {
+    if (isSUHidden(*LSU.SU))
+      continue;
+    for (auto &Pred : LSU.SU->Preds) {
+      const auto *DepR = getLSU(Pred.getSUnit()).Parent;
+      assert(DepR != nullptr);
+      if (Pred.isWeak() ||
+          isSUHidden(*Pred.getSUnit()) ||
+          DepR == &R)
+        continue;
+      if (isExpanded(*DepR))
+        writeSUtoPredSULink(O, *LSU.SU, Pred);
+      else {
+        O << "\tSU" << LSU.SU->NodeNum << " -> Subtree" << DepR->ID;
+        O << getDepColor(Pred.getKind()) << ";\n";
+      }
+    }
+  }
+}
+
 void GCNMinRegScheduler2::writeGraph(StringRef Name) const {
   auto Filename = std::string(Name);
 
@@ -564,33 +695,24 @@ void GCNMinRegScheduler2::writeGraph(StringRef Name) const {
     return;
   }
 
-  DenseSet<unsigned> Expand = { 3792, 3802 };
-
   auto &O = FS;
-  O << "digraph \"" << DOT::EscapeString(Name) << "\" {\n";
-
+  O << "digraph \"" << DOT::EscapeString(Name) << "\" {\n\trankdir=\"BT\";\n";
+  // write subgraphs
   for (auto &R : Roots) {
-    auto TreeID = R.getBottomSU()->NodeNum;
-    if (!Expand.count(TreeID)) {
-      O << "\tSubtree" << TreeID
-        << " [shape = record, style = \"filled\""
-        << ", fillcolor = \"#" << DOT::getColorString(TreeID) << '"'
-        << ", label = \"{Subtree " << TreeID
-        << "| InstrCount = " << R.List.size()
-        << "}\"];\n";
-      for (const auto &P : R.Preds) {
-        O << "\tSubtree" << TreeID << " -> "
-          << "Subtree" << P.first->getID()
-          << "[" // color=green,style=bold
-          << "weight=" << P.second.size()
-          << ",label=" << P.second.size()
-          << "];\n";
-      }
-    } else {
-
-    }
+    if (isExpanded(R))
+      writeExpandedSubtree(O, R);
+    else
+      writeSubtree(O, R);
   }
-
+  // write links
+  for (auto &R : Roots) {
+    if (R.Preds.empty())
+      continue;
+    if (isExpanded(R))
+      writeLinksExpanded(O, R);
+    else
+      writeLinks(O, R);
+  }
   O << "}\n";
 }
 
