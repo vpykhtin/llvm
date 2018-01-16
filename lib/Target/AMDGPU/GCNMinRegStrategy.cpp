@@ -378,6 +378,7 @@ class GCNMinRegScheduler2 {
     unsigned ID;
     simple_ilist<LinkedSU> List;
     DenseMap<Root*, DenseSet<unsigned>> Preds;
+    DenseMap<Root*, DenseSet<unsigned>> Succs;
 
     Root(unsigned ID_, LinkedSU &Bot) : ID(ID_) { add(Bot); }
 
@@ -387,6 +388,14 @@ class GCNMinRegScheduler2 {
     }
 
     const SUnit *getBottomSU() const { return List.front().SU; }
+
+    unsigned getNumLiveOut() const {
+      DenseSet<unsigned> Regs;
+      for (auto &Succ : Succs)
+        for (auto Reg : Succ.second)
+          Regs.insert(Reg);
+      return Regs.size();
+    }
 
     void dump(raw_ostream &O) const;
   };
@@ -408,7 +417,7 @@ public:
                       const ScheduleDAG &DAG)
     : LSUs(DAG.SUnits.begin(), DAG.SUnits.end()) {
     Roots.reserve(BotRoots.size());
-    unsigned TreeID = 1;
+    unsigned TreeID = 0;
     for (auto *SU : BotRoots) {
       Roots.emplace_back(TreeID++, getLSU(SU));
     }
@@ -421,6 +430,11 @@ public:
 private:
   void discoverPseudoTree(Root &R);
   void schedulePseudoTree(Root &R);
+  void merge();
+  bool mergeSuccessors(Root &R);
+  std::map<std::set<Root*>, unsigned> getKills(const Root &R);
+  template <typename Range> void merge(Root &R, Range &&Succs);
+
 
   unsigned getNumSucc(const SUnit *SU, const Root &R) const;
 
@@ -441,8 +455,10 @@ std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
   for (auto &R : Roots) {
     discoverPseudoTree(R);
     //schedulePseudoTree(R);
-    DEBUG(R.dump(dbgs()));
+    //DEBUG(R.dump(dbgs()));
   }
+
+  merge();
 
   DEBUG(writeGraph("subtrees.dot"));
 
@@ -461,19 +477,125 @@ void GCNMinRegScheduler2::discoverPseudoTree(Root &R) {
     Worklist.pop_back();
 
     for (auto &P : make_range(C->Preds.rbegin(), C->Preds.rend())) {
-      //if (!P.isAssignedRegDep()) continue;
-      if (P.isWeak()) continue;
-
+      if (P.isWeak())
+        continue;
       auto &LSU = getLSU(P.getSUnit());
       if (!LSU.Parent) {
         R.add(LSU);
         Worklist.push_back(LSU.SU);
       } else if (LSU.Parent != &R) { // cross edge detected
-        R.Preds[LSU.Parent].insert(P.isAssignedRegDep() ? P.getReg() : 0);
+        auto Reg = P.isAssignedRegDep() ? P.getReg() : 0;
+        R.Preds[LSU.Parent].insert(Reg);
+        LSU.Parent->Succs[&R].insert(Reg);
       }
     }
   } while (!Worklist.empty());
 }
+
+///////////////////////////////////////////////////////////////////////////////
+// Merging
+
+void GCNMinRegScheduler2::merge() {
+  BitVector Visited(Roots.size());
+  std::vector<unsigned> NumSuccs(Roots.size());
+  std::vector<Root*> Worklist;
+  bool Changed;
+  do {
+    Worklist.clear();
+    for (auto &R : Roots) {
+      if (R.List.empty())
+        continue;
+      if (R.Succs.empty())
+        Worklist.push_back(&R);
+      else
+        NumSuccs[R.ID] = R.Succs.size();
+    }
+
+    Changed = false;
+    while (!Changed && !Worklist.empty()) {
+      std::vector<Root*> NewWorklist;
+      for (auto *R : Worklist)
+        for (auto &Pred : R->Preds)
+          if (0 == --NumSuccs[Pred.first->ID])
+            NewWorklist.push_back(Pred.first);
+
+      Worklist = std::move(NewWorklist);
+
+      for (auto *R : Worklist) {
+        if (Visited.test(R->ID))
+          continue;
+        if (!mergeSuccessors(*R)) {
+          Visited.set(R->ID);
+          continue;
+        }
+        // After the merge R may become dependent on already visited root.
+        // If so - clear Visited flag for such predecessors so they could try
+        // to merge this R and restart the whole process
+        for (const auto &Pred : R->Preds)
+          if (Visited.test(Pred.first->ID)) {
+            Visited.reset(Pred.first->ID);
+            Changed = true;
+          }
+      }
+    }
+  } while (Changed);
+}
+
+std::map<std::set<GCNMinRegScheduler2::Root*>, unsigned>
+GCNMinRegScheduler2::getKills(const Root &R) {
+  std::map<std::set<Root*>, unsigned> Kills;
+  for (auto &LSU : make_range(++R.List.begin(), R.List.end())) {
+    const auto &Succs = LSU.SU->Succs;
+    if (Succs.size() == 1)
+      continue;
+
+    std::set<Root*> Killers;
+    for (const auto &Succ : Succs) {
+      if (!Succ.isAssignedRegDep())
+        continue;
+      auto *SuccR = getLSU(Succ.getSUnit()).Parent;
+      if (SuccR != &R)
+        Killers.insert(SuccR);
+    }
+
+    if (!Killers.empty())
+      Kills[Killers]++;
+  }
+  return Kills;
+}
+
+bool GCNMinRegScheduler2::mergeSuccessors(Root &R) {
+  bool Changed = false;
+  for (const auto &K : getKills(R)) {
+    unsigned InstrNum = 0;
+    for(const auto *R : K.first)
+      InstrNum += R->List.size();
+    assert(InstrNum > 0);
+    if (InstrNum <= K.second * 2) {
+      merge(R, K.first);
+      Changed = true;
+    }
+  }
+  return Changed;
+}
+
+template <typename Range>
+void GCNMinRegScheduler2::merge(Root &R, Range &&Succs) {
+  for (auto *Succ : Succs) {
+    for (auto &LSU : Succ->List)
+      LSU.Parent = &R;
+    R.List.splice(R.List.begin(), Succ->List);
+    R.Succs.erase(Succ);
+    for (auto &Pred : Succ->Preds) {
+      if (Pred.first != &R)
+        for(auto Reg : Pred.second)
+          R.Preds[Pred.first].insert(Reg);
+    }
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Scheduling
 
 /// Manage the stack used by a reverse depth-first search over the DAG.
 class SchedDAGReverseDFS {
@@ -561,8 +683,9 @@ void GCNMinRegScheduler2::Root::dump(raw_ostream &O) const {
 
 bool GCNMinRegScheduler2::isExpanded(const Root &R) {
   static const DenseSet<unsigned> Expand = 
-    //{ 1, 2 };
-    { 1, 2, 45, 46 };
+    //{ 0, 1, 20 };
+    //{ 0, 1, 44, 45 };
+    { };
 
   return Expand.count(R.ID) > 0 || (R.List.size() <= 2);
 }
@@ -599,7 +722,8 @@ void GCNMinRegScheduler2::writeSubtree(raw_ostream &O, const Root &R) {
     << " [shape = record, style = \"filled\""
     << ", fillcolor = \"#" << DOT::getColorString(TreeID) << '"'
     << ", label = \"{Subtree " << TreeID
-    << "| InstrCount = " << R.List.size()
+    << "| IC=" << R.List.size()
+    << ", LO=" << R.getNumLiveOut()
     << "}\"];\n";
 }
 
