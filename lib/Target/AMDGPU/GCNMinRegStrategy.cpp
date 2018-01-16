@@ -434,7 +434,7 @@ private:
   bool mergeSuccessors(Root &R);
   std::map<std::set<Root*>, unsigned> getKills(const Root &R);
   template <typename Range> void merge(Root &R, Range &&Succs);
-
+  std::vector<const SUnit*> finalSchedule();
 
   unsigned getNumSucc(const SUnit *SU, const Root &R) const;
 
@@ -443,6 +443,8 @@ private:
   void writeExpandedSubtree(raw_ostream &O, const Root &R) const;
   void writeLinks(raw_ostream &O, const Root &R) const;
   void writeLinksExpanded(raw_ostream &O, const Root &R) const;
+
+  unsigned getConsumersNum(const LinkedSU &LSU) const;
 };
 
 std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
@@ -454,18 +456,17 @@ std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
 
   for (auto &R : Roots) {
     discoverPseudoTree(R);
-    //schedulePseudoTree(R);
-    //DEBUG(R.dump(dbgs()));
+    schedulePseudoTree(R);
+    DEBUG(R.dump(dbgs()));
   }
+
+  DEBUG(writeGraph("subdags_original.dot"));
 
   merge();
 
-  DEBUG(writeGraph("subtrees.dot"));
+  DEBUG(writeGraph("subdags_merged.dot"));
 
-  std::vector<const SUnit*> Res;
-  for (auto &LSU : LSUs)
-    Res.push_back(LSU.SU);
-  return Res;
+  return finalSchedule();
 }
 
 void GCNMinRegScheduler2::discoverPseudoTree(Root &R) {
@@ -670,11 +671,50 @@ void GCNMinRegScheduler2::schedulePseudoTree(Root &R) {
 
   assert(R.List.size() == PrevSize);
 }
+
+///////////////////////////////////////////////////////////////////////////////
+// Final scheduling
+
+std::vector<const SUnit*> GCNMinRegScheduler2::finalSchedule() {
+  std::vector<unsigned> NumPreds(Roots.size());
+  for (auto &R : Roots) {
+    if (R.List.empty())
+      continue;
+    if (!R.Preds.empty())
+      NumPreds[R.ID] = R.Preds.size();
+  }
+  
+  std::vector<const SUnit*> Schedule;
+  Schedule.reserve(LSUs.size());
+
+  std::vector<Root*> Worklist;
+  Worklist.push_back(&Roots[0]);
+  do {
+    std::sort(Worklist.begin(), Worklist.end(),
+      [=](const Root *R1, const Root *R2) -> bool {
+        return R1->List.size() > R2->List.size();
+    });
+    for (const auto *R : Worklist)
+      for (const auto &LSU : make_range(R->List.rbegin(), R->List.rend()))
+        Schedule.push_back(LSU.SU);
+
+    std::vector<Root*> NewWorklist;
+    for (auto *R : Worklist)
+      for (auto &Succ : R->Succs)
+        if (0 == --NumPreds[Succ.first->ID])
+          NewWorklist.push_back(Succ.first);
+
+    Worklist = std::move(NewWorklist);
+  } while (!Worklist.empty());
+
+  return Schedule;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // Dumping
 
 void GCNMinRegScheduler2::Root::dump(raw_ostream &O) const {
-  O << "Subgraph " << getBottomSU()->NodeNum << '\n';
+  O << "Subgraph " << ID << '\n';
   for (const auto &LSU : make_range(List.rbegin(), List.rend())) {
     LSU.SU->getInstr()->print(O);
   }
@@ -685,7 +725,7 @@ bool GCNMinRegScheduler2::isExpanded(const Root &R) {
   static const DenseSet<unsigned> Expand = 
     //{ 0, 1, 20 };
     //{ 0, 1, 44, 45 };
-    { };
+    { 0 };
 
   return Expand.count(R.ID) > 0 || (R.List.size() <= 2);
 }
@@ -754,6 +794,18 @@ static void writeSUtoPredSULink(raw_ostream &O, const SUnit &SU, const SDep &Pre
     << ";\n";
 }
 
+unsigned GCNMinRegScheduler2::getConsumersNum(const LinkedSU &LSU) const {
+  DenseSet<const Root*> Cons;
+  for (auto &Succ : LSU.SU->Succs) {
+    if (!Succ.isWeak() && Succ.isAssignedRegDep()) {
+      auto *SuccR = getLSU(Succ.getSUnit()).Parent;
+      if (SuccR != LSU.Parent)
+        Cons.insert(SuccR);
+    }
+  }
+  return Cons.size();
+}
+
 void GCNMinRegScheduler2::writeExpandedSubtree(raw_ostream &O, const Root &R) const {
   auto TreeID = R.ID;
   O << "\tsubgraph cluster_Subtree" << TreeID << " {\n";
@@ -763,11 +815,17 @@ void GCNMinRegScheduler2::writeExpandedSubtree(raw_ostream &O, const Root &R) co
     auto &SU = *LSU.SU;
     if (isSUHidden(SU))
       continue;
+    auto NumCons = getConsumersNum(LSU);
     O << "\t\t";
     O << "SU" << SU.NodeNum
-      << " [shape = record, style = \"filled\""
+      << " [shape = record, style = \"filled\"";
+    if (NumCons > 0)
+      O << ", color = green";
       //<< ", rank = " << SU.getHeight()
-      << ", label = \"{SU" << SU.NodeNum << '|';
+    O << ", label = \"{SU" << SU.NodeNum;
+    if (NumCons > 0)
+      O << " C(" << NumCons << ')';
+    O << '|';
     SU.getInstr()->print(O, /*SkipOpers=*/true);
     O << "}\"];\n";
   }

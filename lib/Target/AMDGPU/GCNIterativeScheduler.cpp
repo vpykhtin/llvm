@@ -675,6 +675,14 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
 
   auto MaxPressure = Regions.front()->MaxPressure;
   for (auto R : Regions) {
+    DEBUG(
+      dbgs() << "Scheduling\n";
+      printLivenessInfo(dbgs(), R->Begin, R->End, LIS);
+      dbgs() << "RP: ";
+      R->MaxPressure.print(dbgs(), &ST);
+      dbgs() << '\n';
+    );
+
     if (!force && R->MaxPressure.less(ST, MaxPressure, TgtOcc))
       break;
 
