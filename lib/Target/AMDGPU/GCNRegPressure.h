@@ -203,6 +203,11 @@ inline GCNRPTracker::LiveRegSet getLiveRegsBefore(const MachineInstr &MI,
                      MI.getParent()->getParent()->getRegInfo());
 }
 
+GCNRPTracker::LiveRegSet getLiveThroughRegs(const MachineInstr &FirstMI,
+                                            const MachineInstr &LastMI,
+                                            const LiveIntervals &LIS,
+                                            const MachineRegisterInfo &MRI);
+
 template <typename Range>
 GCNRegPressure getRegPressure(const MachineRegisterInfo &MRI,
                               Range &&LiveRegs) {

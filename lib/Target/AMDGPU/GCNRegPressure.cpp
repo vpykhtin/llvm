@@ -250,6 +250,33 @@ collectVirtualRegUses(const MachineInstr &MI, const LiveIntervals &LIS,
 ///////////////////////////////////////////////////////////////////////////////
 // GCNRPTracker
 
+GCNRPTracker::LiveRegSet llvm::getLiveThroughRegs(const MachineInstr &FirstMI,
+                                                  const MachineInstr &LastMI,
+                                                  const LiveIntervals &LIS,
+                                                  const MachineRegisterInfo &MRI) {
+  const auto FirstSlot = LIS.getInstructionIndex(FirstMI).getBaseIndex();
+  const auto EndSlot = LIS.getInstructionIndex(LastMI).getDeadSlot();
+  GCNRPTracker::LiveRegSet LiveRegs;
+  for (unsigned I = 0, E = MRI.getNumVirtRegs(); I != E; ++I) {
+    auto Reg = TargetRegisterInfo::index2VirtReg(I);
+    if (!LIS.hasInterval(Reg))
+      continue;
+    const auto &LI = LIS.getInterval(Reg);
+    if (LI.hasSubRanges()) {
+      for (const auto &SR : LI.subranges()) {
+        auto Seg = SR.FindSegmentContaining(FirstSlot);
+        if (Seg != SR.end() && EndSlot <= Seg->end)
+          LiveRegs[Reg] |= SR.LaneMask;
+      }
+    } else {
+      auto Seg = LI.FindSegmentContaining(FirstSlot);
+      if (Seg != LI.end() && EndSlot <= Seg->end)
+        LiveRegs[Reg] = MRI.getMaxLaneMaskForVReg(Reg);
+    }
+  }
+  return LiveRegs;
+}
+
 LaneBitmask llvm::getLiveLaneMask(unsigned Reg,
                                   SlotIndex SI,
                                   const LiveIntervals &LIS,

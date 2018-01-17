@@ -144,6 +144,10 @@ static void printLivenessInfo(raw_ostream &OS,
   const auto LiveOuts = getLiveRegsAfter(*BottomMI, *LIS);
   OS << "LOt RP: ";
   getRegPressure(MRI, LiveOuts).print(OS);
+
+  const auto LiveThrough = getLiveThroughRegs(*Begin, *BottomMI, *LIS, MRI);
+  OS << "LTr RP: ";
+  getRegPressure(MRI, LiveThrough).print(OS);
 }
 
 LLVM_DUMP_METHOD
