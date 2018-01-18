@@ -106,8 +106,8 @@ static Constant *getNegativeIsTrueBoolVec(ConstantDataVector *V) {
   return ConstantVector::get(BoolVec);
 }
 
-Instruction *InstCombiner::SimplifyElementUnorderedAtomicMemCpy(
-    ElementUnorderedAtomicMemCpyInst *AMI) {
+Instruction *
+InstCombiner::SimplifyElementUnorderedAtomicMemCpy(AtomicMemCpyInst *AMI) {
   // Try to unfold this intrinsic into sequence of explicit atomic loads and
   // stores.
   // First check that number of elements is compile time constant.
@@ -1877,7 +1877,7 @@ Instruction *InstCombiner::visitCallInst(CallInst &CI) {
     if (Changed) return II;
   }
 
-  if (auto *AMI = dyn_cast<ElementUnorderedAtomicMemCpyInst>(II)) {
+  if (auto *AMI = dyn_cast<AtomicMemCpyInst>(II)) {
     if (Constant *C = dyn_cast<Constant>(AMI->getLength()))
       if (C->isNullValue())
         return eraseInstFromFunction(*AMI);
@@ -2017,7 +2017,7 @@ Instruction *InstCombiner::visitCallInst(CallInst &CI) {
   }
   case Intrinsic::fmuladd: {
     // Canonicalize fast fmuladd to the separate fmul + fadd.
-    if (II->hasUnsafeAlgebra()) {
+    if (II->isFast()) {
       BuilderTy::FastMathFlagGuard Guard(Builder);
       Builder.setFastMathFlags(II->getFastMathFlags());
       Value *Mul = Builder.CreateFMul(II->getArgOperand(0),
@@ -3607,7 +3607,8 @@ Instruction *InstCombiner::visitCallInst(CallInst &CI) {
   case Intrinsic::lifetime_start:
     // Asan needs to poison memory to detect invalid access which is possible
     // even for empty lifetime range.
-    if (II->getFunction()->hasFnAttribute(Attribute::SanitizeAddress))
+    if (II->getFunction()->hasFnAttribute(Attribute::SanitizeAddress) ||
+        II->getFunction()->hasFnAttribute(Attribute::SanitizeHWAddress))
       break;
 
     if (removeTriviallyEmptyRange(*II, Intrinsic::lifetime_start,
@@ -4393,6 +4394,7 @@ InstCombiner::transformCallThroughTrampoline(CallSite CS,
             cast<CallInst>(Caller)->getCallingConv());
         cast<CallInst>(NewCaller)->setAttributes(NewPAL);
       }
+      NewCaller->setDebugLoc(Caller->getDebugLoc());
 
       return NewCaller;
     }

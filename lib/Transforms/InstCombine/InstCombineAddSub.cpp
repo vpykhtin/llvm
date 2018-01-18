@@ -482,7 +482,7 @@ Value *FAddCombine::performFactorization(Instruction *I) {
     return nullptr;
 
   FastMathFlags Flags;
-  Flags.setUnsafeAlgebra();
+  Flags.setFast();
   if (I0) Flags &= I->getFastMathFlags();
   if (I1) Flags &= I->getFastMathFlags();
 
@@ -511,7 +511,7 @@ Value *FAddCombine::performFactorization(Instruction *I) {
 }
 
 Value *FAddCombine::simplify(Instruction *I) {
-  assert(I->hasUnsafeAlgebra() && "Should be in unsafe mode");
+  assert(I->isFast() && "Expected 'fast' instruction");
 
   // Currently we are not able to handle vector type.
   if (I->getType()->isVectorTy())
@@ -1386,7 +1386,7 @@ Instruction *InstCombiner::visitFAdd(BinaryOperator &I) {
   if (Value *V = SimplifySelectsFeedingBinaryOp(I, LHS, RHS))
     return replaceInstUsesWith(I, V);
 
-  if (I.hasUnsafeAlgebra()) {
+  if (I.isFast()) {
     if (Value *V = FAddCombine(Builder).simplify(&I))
       return replaceInstUsesWith(I, V);
   }
@@ -1520,8 +1520,13 @@ Instruction *InstCombiner::visitSub(BinaryOperator &I) {
     return BinaryOperator::CreateNot(Op1);
 
   if (Constant *C = dyn_cast<Constant>(Op0)) {
+    Value *X;
+    // C - zext(bool) -> bool ? C - 1 : C
+    if (match(Op1, m_ZExt(m_Value(X))) &&
+        X->getType()->getScalarSizeInBits() == 1)
+      return SelectInst::Create(X, SubOne(C), C);
+
     // C - ~X == X + (1+C)
-    Value *X = nullptr;
     if (match(Op1, m_Not(m_Value(X))))
       return BinaryOperator::CreateAdd(X, AddOne(C));
 
@@ -1736,7 +1741,7 @@ Instruction *InstCombiner::visitFSub(BinaryOperator &I) {
   if (Value *V = SimplifySelectsFeedingBinaryOp(I, Op0, Op1))
     return replaceInstUsesWith(I, V);
 
-  if (I.hasUnsafeAlgebra()) {
+  if (I.isFast()) {
     if (Value *V = FAddCombine(Builder).simplify(&I))
       return replaceInstUsesWith(I, V);
   }

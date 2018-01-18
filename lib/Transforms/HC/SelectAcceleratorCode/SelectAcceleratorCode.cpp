@@ -15,6 +15,7 @@
 // more expensive full Inliner pass.
 //
 //===----------------------------------------------------------------------===//
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/InlineCost.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
@@ -26,150 +27,147 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
-#include <unordered_set>
 
 using namespace llvm;
-using namespace std;
 
-namespace
-{
-    class SelectAcceleratorCode : public ModulePass {
-        unordered_set<Function*> hcCallees_;
+namespace {
+class SelectAcceleratorCode : public ModulePass {
+    SmallPtrSet<const Function*, 8u> HCCallees_;
 
-        void findAllHCCallees_(const Function &f, Module &M)
-        {
-            for (auto&& x : f) {
-                for (auto&& y : x) {
-                    if (y.getOpcode() == Instruction::Call) {
-                        auto g = cast<CallInst>(y).getCalledFunction();
-                        if (g) {
-                            auto t =
-                                hcCallees_.insert(M.getFunction(g->getName()));
-                            if (t.second) findAllHCCallees_(*g, M);
-                        }
+    void findAllHCCallees_(const Function &F, Module &M)
+    {
+        for (auto&& BB : F) {
+            for (auto&& I : BB) {
+                if (I.getOpcode() == Instruction::Call) {
+                    auto Callee = cast<CallInst>(I).getCalledFunction();
+                    if (Callee) {
+                        auto Tmp = HCCallees_.insert(M.getFunction(Callee->getName()));
+                        if (Tmp.second) findAllHCCallees_(*Callee, M);
                     }
                 }
             }
         }
+    }
 
-        template<typename T>
-        static
-        void erase_(T& x)
-        {
-            x.dropAllReferences();
-            x.replaceAllUsesWith(UndefValue::get(x.getType()));
-            x.eraseFromParent();
-        }
+    template<typename T>
+    static
+    void erase_(T &X)
+    {
+        X.dropAllReferences();
+        X.replaceAllUsesWith(UndefValue::get(X.getType()));
+        X.eraseFromParent();
+    }
 
-        template<typename F, typename G, typename P>
-        bool eraseIf_(F f, G l, P p) const
-        {
-            bool r = false;
+    template<typename F, typename G, typename P>
+    bool eraseIf_(F First, G Last, P Predicate) const
+    {
+        bool erasedSome = false;
 
-            auto it = f();
-            while (it != l()) {
-                it->removeDeadConstantUsers();
-                if (p(*it)) {
-                    erase_(*it);
-                    r = true;
-                    it = f();
-                }
-                else ++it;
+        auto It = First();
+        while (It != Last()) {
+            It->removeDeadConstantUsers();
+            if (Predicate(*It)) {
+                erase_(*It);
+                erasedSome = true;
+                It = First();
             }
-
-            return r;
+            else ++It;
         }
 
-        bool eraseNonHCFunctions_(Module &M) const
-        {
-            return eraseIf_(
-                [&]() { return M.begin(); },
-                [&]() { return M.end(); },
-                [&, this](const Function& x) {
-                    return hcCallees_.count(M.getFunction(x.getName())) == 0;
-                });
-        }
+        return erasedSome;
+    }
 
-        bool eraseDeadGlobals_(Module &M) const
-        {
-            return eraseIf_(
-                [&]() { return M.global_begin(); },
-                [&]() { return M.global_end(); },
-                [](const Constant& x) { return !x.isConstantUsed(); });
-        }
+    bool eraseNonHCFunctions_(Module &M) const
+    {
+        return eraseIf_(
+            [&]() { return M.begin(); },
+            [&]() { return M.end(); },
+            [&, this](const Function &F) {
+                return HCCallees_.count(M.getFunction(F.getName())) == 0;
+            });
+    }
 
-        bool eraseDeadAliases_(Module &M)
-        {
-            return eraseIf_(
-                [&]() { return M.alias_begin(); },
-                [&]() { return M.alias_end(); },
-                [](const Constant& x) { return !x.isConstantUsed(); });
-        }
+    bool eraseDeadGlobals_(Module &M) const
+    {
+        return eraseIf_(
+            [&]() { return M.global_begin(); },
+            [&]() { return M.global_end(); },
+            [](const Constant& K) { return !K.isConstantUsed(); });
+    }
 
-        static
-        bool alwaysInline_(Function& x)
-        {
-            if (!x.hasFnAttribute(Attribute::AlwaysInline)) {
-                if (x.hasFnAttribute(Attribute::NoInline)) {
-                    x.removeFnAttr(Attribute::NoInline);
-                }
-                x.addFnAttr(Attribute::AlwaysInline);
+    bool eraseDeadAliases_(Module &M)
+    {
+        return eraseIf_(
+            [&]() { return M.alias_begin(); },
+            [&]() { return M.alias_end(); },
+            [](const Constant& K) { return !K.isConstantUsed(); });
+    }
 
-                return false;
+    static
+    bool alwaysInline_(Function &F)
+    {
+        if (!F.hasFnAttribute(Attribute::AlwaysInline)) {
+            if (F.hasFnAttribute(Attribute::NoInline)) {
+                F.removeFnAttr(Attribute::NoInline);
             }
-
-            return true;
-        }
-    public:
-        static char ID;
-        SelectAcceleratorCode() : ModulePass{ID} {}
-
-        bool doInitialization(Module &M) override
-        {   // TODO: this may represent a valid analysis pass.
-            for (auto&& x : M.functions()) {
-                if (x.hasFnAttribute("HC")) {
-                    auto t = hcCallees_.insert(M.getFunction(x.getName()));
-                    if (t.second) findAllHCCallees_(x, M);
-                }
-            }
+            F.addFnAttr(Attribute::AlwaysInline);
 
             return false;
         }
 
-        bool runOnModule(Module &M) override
-        {
-            bool r = eraseNonHCFunctions_(M);
+        return true;
+    }
+public:
+    static char ID;
+    SelectAcceleratorCode() : ModulePass{ID} {}
 
-            r = eraseDeadGlobals_(M) || r;
-
-            M.dropTriviallyDeadConstantArrays();
-
-            r = eraseDeadAliases_(M) || r;
-
-            return r;
+    bool doInitialization(Module &M) override
+    {   // TODO: this may represent a valid analysis pass.
+        for (auto&& F : M.functions()) {
+            if (F.getCallingConv() == CallingConv::AMDGPU_KERNEL) {
+                 auto Tmp = HCCallees_.insert(M.getFunction(F.getName()));
+                if (Tmp.second) findAllHCCallees_(F, M);
+            }
         }
 
-        bool doFinalization(Module& M) override
-        {
-            bool r = false;
-            std::for_each(M.begin(), M.end(), [&](Function& x) {
-                if (!isInlineViable(x) && !x.isIntrinsic()) {
-                    M.getContext().diagnose(DiagnosticInfoUnsupported{
-                        x, "The function cannot be inlined."});
-                }
+        return false;
+    }
 
-                r = !alwaysInline_(x);
-            });
+    bool runOnModule(Module &M) override
+    {
+        bool Modified = eraseNonHCFunctions_(M);
 
-            return r;
+        Modified = eraseDeadGlobals_(M) || Modified;
+
+        M.dropTriviallyDeadConstantArrays();
+
+        Modified = eraseDeadAliases_(M) || Modified;
+
+        for (auto&& F : M.functions()) Modified = !alwaysInline_(F) || Modified;
+
+        return Modified;
+    }
+
+    bool doFinalization(Module& M) override
+    {
+        const auto It = std::find_if(M.begin(), M.end(), [](Function& F) {
+            return !isInlineViable(F) && !F.isIntrinsic();
+        });
+
+        if (It != M.end()) {
+            M.getContext().diagnose(DiagnosticInfoUnsupported{
+                *It, "The function cannot be inlined."});
         }
-    };
-    char SelectAcceleratorCode::ID = 0;
 
-    static RegisterPass<SelectAcceleratorCode> X{
-        "select-accelerator-code",
-        "Selects only the code that is expected to run on an accelerator, "
-        "ensuring that it can be lowered by AMDGPU.",
-        false,
-        false};
+        return false;
+    }
+};
+char SelectAcceleratorCode::ID = 0;
+
+static RegisterPass<SelectAcceleratorCode> X{
+    "select-accelerator-code",
+    "Selects only the code that is expected to run on an accelerator, "
+    "ensuring that it can be lowered by AMDGPU.",
+    false,
+    false};
 }

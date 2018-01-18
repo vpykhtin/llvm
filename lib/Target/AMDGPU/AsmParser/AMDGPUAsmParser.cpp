@@ -132,6 +132,7 @@ public:
     ImmTyIdxen,
     ImmTyAddr64,
     ImmTyOffset,
+    ImmTyInstOffset,
     ImmTyOffset0,
     ImmTyOffset1,
     ImmTyGLC,
@@ -294,8 +295,8 @@ public:
   bool isOffset0() const { return isImmTy(ImmTyOffset0) && isUInt<16>(getImm()); }
   bool isOffset1() const { return isImmTy(ImmTyOffset1) && isUInt<8>(getImm()); }
 
-  bool isOffsetU12() const { return isImmTy(ImmTyOffset) && isUInt<12>(getImm()); }
-  bool isOffsetS13() const { return isImmTy(ImmTyOffset) && isInt<13>(getImm()); }
+  bool isOffsetU12() const { return (isImmTy(ImmTyOffset) || isImmTy(ImmTyInstOffset)) && isUInt<12>(getImm()); }
+  bool isOffsetS13() const { return (isImmTy(ImmTyOffset) || isImmTy(ImmTyInstOffset)) && isInt<13>(getImm()); }
   bool isGDS() const { return isImmTy(ImmTyGDS); }
   bool isGLC() const { return isImmTy(ImmTyGLC); }
   bool isSLC() const { return isImmTy(ImmTySLC); }
@@ -535,6 +536,10 @@ public:
     return EndLoc;
   }
 
+  SMRange getLocRange() const {
+    return SMRange(StartLoc, EndLoc);
+  }
+
   Modifiers getModifiers() const {
     assert(isRegKind() || isImmTy(ImmTyNone));
     return isRegKind() ? Reg.Mods : Imm.Mods;
@@ -642,6 +647,7 @@ public:
     case ImmTyIdxen: OS << "Idxen"; break;
     case ImmTyAddr64: OS << "Addr64"; break;
     case ImmTyOffset: OS << "Offset"; break;
+    case ImmTyInstOffset: OS << "InstOffset"; break;
     case ImmTyOffset0: OS << "Offset0"; break;
     case ImmTyOffset1: OS << "Offset1"; break;
     case ImmTyGLC: OS << "GLC"; break;
@@ -1077,10 +1083,7 @@ public:
                OptionalImmIndexMap &OptionalIdx);
   void cvtVOP3OpSel(MCInst &Inst, const OperandVector &Operands);
   void cvtVOP3(MCInst &Inst, const OperandVector &Operands);
-  void cvtVOP3PImpl(MCInst &Inst, const OperandVector &Operands,
-                    bool IsPacked);
   void cvtVOP3P(MCInst &Inst, const OperandVector &Operands);
-  void cvtVOP3P_NotPacked(MCInst &Inst, const OperandVector &Operands);
 
   void cvtVOP3Interp(MCInst &Inst, const OperandVector &Operands);
 
@@ -2245,6 +2248,9 @@ bool AMDGPUAsmParser::validateInstruction(const MCInst &Inst,
   return true;
 }
 
+static std::string AMDGPUMnemonicSpellCheck(StringRef S, uint64_t FBS,
+                                            unsigned VariantID = 0);
+
 bool AMDGPUAsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
                                               OperandVector &Operands,
                                               MCStreamer &Out,
@@ -2287,8 +2293,13 @@ bool AMDGPUAsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
   case Match_MissingFeature:
     return Error(IDLoc, "instruction not supported on this GPU");
 
-  case Match_MnemonicFail:
-    return Error(IDLoc, "unrecognized instruction mnemonic");
+  case Match_MnemonicFail: {
+    uint64_t FBS = ComputeAvailableFeatures(getSTI().getFeatureBits());
+    std::string Suggestion = AMDGPUMnemonicSpellCheck(
+        ((AMDGPUOperand &)*Operands[0]).getToken(), FBS);
+    return Error(IDLoc, "invalid instruction" + Suggestion,
+                 ((AMDGPUOperand &)*Operands[0]).getLocRange());
+  }
 
   case Match_InvalidOperand: {
     SMLoc ErrorLoc = IDLoc;
@@ -2579,6 +2590,25 @@ bool AMDGPUAsmParser::ParseDirective(AsmToken DirectiveID) {
 
 bool AMDGPUAsmParser::subtargetHasRegister(const MCRegisterInfo &MRI,
                                            unsigned RegNo) const {
+
+  for (MCRegAliasIterator R(AMDGPU::TTMP12_TTMP13_TTMP14_TTMP15, &MRI, true);
+       R.isValid(); ++R) {
+    if (*R == RegNo)
+      return isGFX9();
+  }
+
+  switch (RegNo) {
+  case AMDGPU::TBA:
+  case AMDGPU::TBA_LO:
+  case AMDGPU::TBA_HI:
+  case AMDGPU::TMA:
+  case AMDGPU::TMA_LO:
+  case AMDGPU::TMA_HI:
+    return !isGFX9();
+  default:
+    break;
+  }
+
   if (isCI())
     return true;
 
@@ -4110,6 +4140,7 @@ static const OptionalOperand AMDGPUOptionalOperandTable[] = {
   {"offset1", AMDGPUOperand::ImmTyOffset1, false, nullptr},
   {"gds",     AMDGPUOperand::ImmTyGDS, true, nullptr},
   {"offset",  AMDGPUOperand::ImmTyOffset, false, nullptr},
+  {"inst_offset", AMDGPUOperand::ImmTyInstOffset, false, nullptr},
   {"dfmt",    AMDGPUOperand::ImmTyDFMT, false, nullptr},
   {"nfmt",    AMDGPUOperand::ImmTyNFMT, false, nullptr},
   {"glc",     AMDGPUOperand::ImmTyGLC, true, nullptr},
@@ -4320,11 +4351,13 @@ void AMDGPUAsmParser::cvtVOP3(MCInst &Inst, const OperandVector &Operands) {
   cvtVOP3(Inst, Operands, OptionalIdx);
 }
 
-void AMDGPUAsmParser::cvtVOP3PImpl(MCInst &Inst,
-                                   const OperandVector &Operands,
-                                   bool IsPacked) {
+void AMDGPUAsmParser::cvtVOP3P(MCInst &Inst,
+                               const OperandVector &Operands) {
   OptionalImmIndexMap OptIdx;
-  int Opc = Inst.getOpcode();
+  const int Opc = Inst.getOpcode();
+  const MCInstrDesc &Desc = MII.get(Opc);
+
+  const bool IsPacked = (Desc.TSFlags & SIInstrFlags::IsPacked) != 0;
 
   cvtVOP3(Inst, Operands, OptIdx);
 
@@ -4340,7 +4373,6 @@ void AMDGPUAsmParser::cvtVOP3PImpl(MCInst &Inst,
 
   int OpSelHiIdx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::op_sel_hi);
   if (OpSelHiIdx != -1) {
-    // TODO: Should we change the printing to match?
     int DefaultVal = IsPacked ? -1 : 0;
     addOptionalImmOperand(Inst, Operands, OptIdx, AMDGPUOperand::ImmTyOpSelHi,
                           DefaultVal);
@@ -4400,15 +4432,6 @@ void AMDGPUAsmParser::cvtVOP3PImpl(MCInst &Inst,
 
     Inst.getOperand(ModIdx).setImm(Inst.getOperand(ModIdx).getImm() | ModVal);
   }
-}
-
-void AMDGPUAsmParser::cvtVOP3P(MCInst &Inst, const OperandVector &Operands) {
-  cvtVOP3PImpl(Inst, Operands, true);
-}
-
-void AMDGPUAsmParser::cvtVOP3P_NotPacked(MCInst &Inst,
-                                         const OperandVector &Operands) {
-  cvtVOP3PImpl(Inst, Operands, false);
 }
 
 //===----------------------------------------------------------------------===//
@@ -4775,6 +4798,7 @@ extern "C" void LLVMInitializeAMDGPUAsmParser() {
 
 #define GET_REGISTER_MATCHER
 #define GET_MATCHER_IMPLEMENTATION
+#define GET_MNEMONIC_SPELL_CHECKER
 #include "AMDGPUGenAsmMatcher.inc"
 
 // This fuction should be defined after auto-generated include so that we have

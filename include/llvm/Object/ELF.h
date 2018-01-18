@@ -277,6 +277,9 @@ ELFFile<ELFT>::getSectionContentsAsArray(const Elf_Shdr *Sec) const {
       Offset + Size > Buf.size())
     return createError("invalid section offset");
 
+  if (Offset % alignof(T))
+    return createError("unaligned data");
+
   const T *Start = reinterpret_cast<const T *>(base() + Offset);
   return makeArrayRef(Start, Size / sizeof(T));
 }
@@ -354,11 +357,6 @@ Expected<ELFFile<ELFT>> ELFFile<ELFT>::create(StringRef Object) {
   if (sizeof(Elf_Ehdr) > Object.size())
     return createError("Invalid buffer");
   return ELFFile(Object);
-}
-
-template <class ELFT>
-bool compareAddr(uint64_t VAddr, const Elf_Phdr_Impl<ELFT> *Phdr) {
-  return VAddr < Phdr->p_vaddr;
 }
 
 template <class ELFT>

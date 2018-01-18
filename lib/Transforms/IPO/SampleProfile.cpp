@@ -69,6 +69,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Instrumentation.h"
+#include "llvm/Transforms/Utils/CallPromotionUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include <algorithm>
 #include <cassert>
@@ -200,7 +201,7 @@ protected:
   const FunctionSamples *findFunctionSamples(const Instruction &I) const;
   bool inlineCallInstruction(Instruction *I);
   bool inlineHotFunctions(Function &F,
-                          DenseSet<GlobalValue::GUID> &ImportGUIDs);
+                          DenseSet<GlobalValue::GUID> &InlinedGUIDs);
   void printEdgeWeight(raw_ostream &OS, Edge E);
   void printBlockWeight(raw_ostream &OS, const BasicBlock *BB) const;
   void printBlockEquivalence(raw_ostream &OS, const BasicBlock *BB);
@@ -766,12 +767,12 @@ bool SampleProfileLoader::inlineCallInstruction(Instruction *I) {
 /// it to direct call. Each indirect call is limited with a single target.
 ///
 /// \param F function to perform iterative inlining.
-/// \param ImportGUIDs a set to be updated to include all GUIDs that come
-///     from a different module but inlined in the profiled binary.
+/// \param InlinedGUIDs a set to be updated to include all GUIDs that are
+///     inlined in the profiled binary.
 ///
 /// \returns True if there is any inline happened.
 bool SampleProfileLoader::inlineHotFunctions(
-    Function &F, DenseSet<GlobalValue::GUID> &ImportGUIDs) {
+    Function &F, DenseSet<GlobalValue::GUID> &InlinedGUIDs) {
   DenseSet<Instruction *> PromotedInsns;
   bool Changed = false;
   while (true) {
@@ -804,9 +805,9 @@ bool SampleProfileLoader::inlineHotFunctions(
         uint64_t Sum;
         for (const auto *FS : findIndirectCallFunctionSamples(*I, Sum)) {
           if (IsThinLTOPreLink) {
-            FS->findImportedFunctions(ImportGUIDs, F.getParent(),
-                                      Samples->getTotalSamples() *
-                                          SampleProfileHotThreshold / 100);
+            FS->findInlinedFunctions(InlinedGUIDs, F.getParent(),
+                                     Samples->getTotalSamples() *
+                                         SampleProfileHotThreshold / 100);
             continue;
           }
           auto CalleeFunctionName = FS->getName();
@@ -823,10 +824,10 @@ bool SampleProfileLoader::inlineHotFunctions(
           if (R != SymbolMap.end() && R->getValue() &&
               !R->getValue()->isDeclaration() &&
               R->getValue()->getSubprogram() &&
-              isLegalToPromote(I, R->getValue(), &Reason)) {
+              isLegalToPromote(CallSite(I), R->getValue(), &Reason)) {
             uint64_t C = FS->getEntrySamples();
-            Instruction *DI = promoteIndirectCall(
-                I, R->getValue(), C, Sum, false, ORE);
+            Instruction *DI =
+                pgo::promoteIndirectCall(I, R->getValue(), C, Sum, false, ORE);
             Sum -= C;
             PromotedInsns.insert(I);
             // If profile mismatches, we should not attempt to inline DI.
@@ -844,8 +845,8 @@ bool SampleProfileLoader::inlineHotFunctions(
         if (inlineCallInstruction(I))
           LocalChanged = true;
       } else if (IsThinLTOPreLink) {
-        findCalleeFunctionSamples(*I)->findImportedFunctions(
-            ImportGUIDs, F.getParent(),
+        findCalleeFunctionSamples(*I)->findInlinedFunctions(
+            InlinedGUIDs, F.getParent(),
             Samples->getTotalSamples() * SampleProfileHotThreshold / 100);
       }
     }
@@ -1182,24 +1183,20 @@ void SampleProfileLoader::buildEdges(Function &F) {
   }
 }
 
-/// Sorts the CallTargetMap \p M by count in descending order and stores the
-/// sorted result in \p Sorted. Returns the total counts.
-static uint64_t SortCallTargets(SmallVector<InstrProfValueData, 2> &Sorted,
-                                const SampleRecord::CallTargetMap &M) {
-  Sorted.clear();
-  uint64_t Sum = 0;
-  for (auto I = M.begin(); I != M.end(); ++I) {
-    Sum += I->getValue();
-    Sorted.push_back({Function::getGUID(I->getKey()), I->getValue()});
-  }
-  std::sort(Sorted.begin(), Sorted.end(),
+/// Returns the sorted CallTargetMap \p M by count in descending order.
+static SmallVector<InstrProfValueData, 2> SortCallTargets(
+    const SampleRecord::CallTargetMap &M) {
+  SmallVector<InstrProfValueData, 2> R;
+  for (auto I = M.begin(); I != M.end(); ++I)
+    R.push_back({Function::getGUID(I->getKey()), I->getValue()});
+  std::sort(R.begin(), R.end(),
             [](const InstrProfValueData &L, const InstrProfValueData &R) {
               if (L.Count == R.Count)
                 return L.Value > R.Value;
               else
                 return L.Count > R.Count;
             });
-  return Sum;
+  return R;
 }
 
 /// \brief Propagate weights into edges
@@ -1292,8 +1289,10 @@ void SampleProfileLoader::propagateWeights(Function &F) {
           auto T = FS->findCallTargetMapAt(LineOffset, Discriminator);
           if (!T || T.get().empty())
             continue;
-          SmallVector<InstrProfValueData, 2> SortedCallTargets;
-          uint64_t Sum = SortCallTargets(SortedCallTargets, T.get());
+          SmallVector<InstrProfValueData, 2> SortedCallTargets =
+              SortCallTargets(T.get());
+          uint64_t Sum;
+          findIndirectCallFunctionSamples(I, Sum);
           annotateValueSite(*I.getParent()->getParent()->getParent(), I,
                             SortedCallTargets, Sum, IPVK_IndirectCallTarget,
                             SortedCallTargets.size());
@@ -1455,18 +1454,19 @@ bool SampleProfileLoader::emitAnnotations(Function &F) {
   DEBUG(dbgs() << "Line number for the first instruction in " << F.getName()
                << ": " << getFunctionLoc(F) << "\n");
 
-  DenseSet<GlobalValue::GUID> ImportGUIDs;
-  Changed |= inlineHotFunctions(F, ImportGUIDs);
+  DenseSet<GlobalValue::GUID> InlinedGUIDs;
+  Changed |= inlineHotFunctions(F, InlinedGUIDs);
 
   // Compute basic block weights.
   Changed |= computeBlockWeights(F);
 
   if (Changed) {
     // Add an entry count to the function using the samples gathered at the
-    // function entry. Also sets the GUIDs that comes from a different
-    // module but inlined in the profiled binary. This is aiming at making
-    // the IR match the profiled binary before annotation.
-    F.setEntryCount(Samples->getHeadSamples() + 1, &ImportGUIDs);
+    // function entry.
+    // Sets the GUIDs that are inlined in the profiled binary. This is used
+    // for ThinLink to make correct liveness analysis, and also make the IR
+    // match the profiled binary before annotation.
+    F.setEntryCount(Samples->getHeadSamples() + 1, &InlinedGUIDs);
 
     // Compute dominance and loop info needed for propagation.
     computeDominanceAndLoopInfo(F);
@@ -1583,7 +1583,10 @@ bool SampleProfileLoaderLegacyPass::runOnModule(Module &M) {
 }
 
 bool SampleProfileLoader::runOnFunction(Function &F, ModuleAnalysisManager *AM) {
-  F.setEntryCount(0);
+  // Initialize the entry count to -1, which will be treated conservatively
+  // by getEntryCount as the same as unknown (None). If we have samples this
+  // will be overwritten in emitAnnotations.
+  F.setEntryCount(-1);
   std::unique_ptr<OptimizationRemarkEmitter> OwnedORE;
   if (AM) {
     auto &FAM =

@@ -132,6 +132,7 @@ namespace llvm {
   void initializeHexagonNewValueJumpPass(PassRegistry&);
   void initializeHexagonOptAddrModePass(PassRegistry&);
   void initializeHexagonPacketizerPass(PassRegistry&);
+  void initializeHexagonRDFOptPass(PassRegistry&);
   Pass *createHexagonLoopIdiomPass();
   Pass *createHexagonVectorLoopCarriedReusePass();
 
@@ -145,6 +146,7 @@ namespace llvm {
   FunctionPass *createHexagonCopyToCombine();
   FunctionPass *createHexagonEarlyIfConversion();
   FunctionPass *createHexagonFixupHwLoops();
+  FunctionPass *createHexagonGatherPacketize();
   FunctionPass *createHexagonGenExtract();
   FunctionPass *createHexagonGenInsert();
   FunctionPass *createHexagonGenMux();
@@ -191,6 +193,7 @@ extern "C" void LLVMInitializeHexagonTarget() {
   initializeHexagonNewValueJumpPass(PR);
   initializeHexagonOptAddrModePass(PR);
   initializeHexagonPacketizerPass(PR);
+  initializeHexagonRDFOptPass(PR);
 }
 
 HexagonTargetMachine::HexagonTargetMachine(const Target &T, const Triple &TT,
@@ -394,9 +397,15 @@ void HexagonPassConfig::addPreEmitPass() {
     // Generate MUX from pairs of conditional transfers.
     if (EnableGenMux)
       addPass(createHexagonGenMux());
-
-    addPass(createHexagonPacketizer(), false);
   }
+
+  // Create packets for 2 instructions that consitute a gather instruction.
+  // Do this regardless of the opt level.
+  addPass(createHexagonGatherPacketize(), false);
+
+  if (!NoOpt)
+    addPass(createHexagonPacketizer(), false);
+
   if (EnableVectorPrint)
     addPass(createHexagonVectorPrint(), false);
 

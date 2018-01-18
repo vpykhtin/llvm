@@ -25,7 +25,6 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/LoopIterator.h"
-#include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpander.h"
 #include "llvm/IR/BasicBlock.h"
@@ -540,7 +539,6 @@ bool llvm::UnrollRuntimeLoopRemainder(Loop *L, unsigned Count,
                                       bool UnrollRemainder,
                                       LoopInfo *LI, ScalarEvolution *SE,
                                       DominatorTree *DT, AssumptionCache *AC,
-                                      OptimizationRemarkEmitter *ORE,
                                       bool PreserveLCSSA) {
   DEBUG(dbgs() << "Trying runtime unrolling on Loop: \n");
   DEBUG(L->dump());
@@ -907,12 +905,12 @@ bool llvm::UnrollRuntimeLoopRemainder(Loop *L, unsigned Count,
 
   if (remainderLoop && UnrollRemainder) {
     DEBUG(dbgs() << "Unrolling remainder loop\n");
-    UnrollLoop(remainderLoop, /*Count*/Count - 1, /*TripCount*/Count - 1,
-               /*Force*/false, /*AllowRuntime*/false,
-               /*AllowExpensiveTripCount*/false, /*PreserveCondBr*/true,
-               /*PreserveOnlyFirst*/false, /*TripMultiple*/1,
-               /*PeelCount*/0, /*UnrollRemainder*/false, LI, SE, DT, AC, ORE,
-               PreserveLCSSA);
+    UnrollLoop(remainderLoop, /*Count*/ Count - 1, /*TripCount*/ Count - 1,
+               /*Force*/ false, /*AllowRuntime*/ false,
+               /*AllowExpensiveTripCount*/ false, /*PreserveCondBr*/ true,
+               /*PreserveOnlyFirst*/ false, /*TripMultiple*/ 1,
+               /*PeelCount*/ 0, /*UnrollRemainder*/ false, LI, SE, DT, AC,
+               /*ORE*/ nullptr, PreserveLCSSA);
   }
 
   NumRuntimeUnrolled++;

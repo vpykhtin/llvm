@@ -188,15 +188,16 @@ JumpThreadingPass::JumpThreadingPass(int T) {
 //
 //  Given that P(cond == true) = P(cond == true | A) * P(A) +
 //                               P(cond == true | B) * P(B)
-//  we get
+//  we get:
 //     P(cond == true ) = P(A) + P(cond == true | B) * P(B)
 //
 //  which gives us:
-//     P(A) <= P(c == true), i.e.
+//     P(A) is less than P(cond == true), i.e.
 //     P(t == true) <= P(cond == true)
 //
-//  In other words, if we know P(cond == true), we know that P(t == true)
-//  can not be greater than 1%.
+//  In other words, if we know P(cond == true) is unlikely, we know
+//  that P(t == true) is also unlikely.
+//
 static void updatePredecessorProfileMetadata(PHINode *PN, BasicBlock *BB) {
   BranchInst *CondBr = dyn_cast<BranchInst>(BB->getTerminator());
   if (!CondBr)
@@ -1331,6 +1332,20 @@ bool JumpThreadingPass::SimplifyPartiallyRedundantLoad(LoadInst *LI) {
   // This ensures that we only have to insert one reload, thus not increasing
   // code size.
   BasicBlock *UnavailablePred = nullptr;
+
+  // If the value is unavailable in one of predecessors, we will end up
+  // inserting a new instruction into them. It is only valid if all the
+  // instructions before LI are guaranteed to pass execution to its successor,
+  // or if LI is safe to speculate.
+  // TODO: If this logic becomes more complex, and we will perform PRE insertion
+  // farther than to a predecessor, we need to reuse the code from GVN's PRE.
+  // It requires domination tree analysis, so for this simple case it is an
+  // overkill.
+  if (PredsScanned.size() != AvailablePreds.size() &&
+      !isSafeToSpeculativelyExecute(LI))
+    for (auto I = LoadBB->begin(); &*I != LI; ++I)
+      if (!isGuaranteedToTransferExecutionToSuccessor(&*I))
+        return false;
 
   // If there is exactly one predecessor where the value is unavailable, the
   // already computed 'OneUnavailablePred' block is it.  If it ends in an

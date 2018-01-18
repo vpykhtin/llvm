@@ -1624,6 +1624,15 @@ PHINode *WidenIV::createWideIV(SCEVExpander &Rewriter) {
     if (DU.NarrowDef->use_empty())
       DeadInsts.emplace_back(DU.NarrowDef);
   }
+
+  // Attach any debug information to the new PHI. Since OrigPhi and WidePHI
+  // evaluate the same recurrence, we can just copy the debug info over.
+  SmallVector<DbgValueInst *, 1> DbgValues;
+  llvm::findDbgValues(DbgValues, OrigPhi);
+  auto *MDPhi = MetadataAsValue::get(WidePhi->getContext(),
+                                     ValueAsMetadata::get(WidePhi));
+  for (auto &DbgValue : DbgValues)
+    DbgValue->setOperand(0, MDPhi);
   return WidePhi;
 }
 
