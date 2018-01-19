@@ -158,6 +158,9 @@ protected:
                     const GCNRegPressure &Before,
                     const GCNRegPressure &After) const;
 
+  template <typename Range>
+  bool validateSchedule(const Region &R, const Range &Schedule);
+
   void writeGraph(StringRef Name);
 };
 

@@ -286,22 +286,27 @@ namespace {
 
 class GCNMinRegScheduler2 {
 
-  struct Root;
+  struct Subgraph;
 
   struct LinkedSU : ilist_node<LinkedSU> {
     const SUnit * const SU;
-    Root *Parent = nullptr;
+    Subgraph *Parent = nullptr;
 
     LinkedSU(const SUnit &SU_) : SU(&SU_) {}
+
+    unsigned getIndex() const {
+      assert(!SU->isBoundaryNode());
+      return SU->NodeNum;
+    }
   };
 
-  struct Root {
+  struct Subgraph {
     unsigned ID;
     simple_ilist<LinkedSU> List;
-    DenseMap<Root*, DenseSet<unsigned>> Preds;
-    DenseMap<Root*, DenseSet<unsigned>> Succs;
+    DenseMap<Subgraph*, DenseSet<unsigned>> Preds;
+    DenseMap<Subgraph*, DenseSet<unsigned>> Succs;
 
-    Root(unsigned ID_, LinkedSU &Bot) : ID(ID_) { add(Bot); }
+    Subgraph(unsigned ID_, LinkedSU &Bot) : ID(ID_) { add(Bot); }
 
     void add(LinkedSU &LSU) {
       List.push_back(LSU);
@@ -309,6 +314,8 @@ class GCNMinRegScheduler2 {
     }
 
     const SUnit *getBottomSU() const { return List.front().SU; }
+
+    bool empty() const { return List.empty(); }
 
     unsigned getNumLiveOut() const {
       DenseSet<unsigned> Regs;
@@ -322,7 +329,7 @@ class GCNMinRegScheduler2 {
   };
 
   std::vector<LinkedSU> LSUs;
-  std::vector<Root> Roots;
+  std::vector<Subgraph> Subgraphs;
   mutable std::vector<unsigned> UnitDepth;
 
   LinkedSU &getLSU(const SUnit *SU) {
@@ -339,10 +346,10 @@ public:
                       const ScheduleDAG &DAG)
     : LSUs(DAG.SUnits.begin(), DAG.SUnits.end())
     , UnitDepth(DAG.SUnits.size(), -1) {
-    Roots.reserve(BotRoots.size());
+    Subgraphs.reserve(BotRoots.size());
     unsigned SubGraphID = 0;
     for (auto *SU : BotRoots) {
-      Roots.emplace_back(SubGraphID++, getLSU(SU));
+      Subgraphs.emplace_back(SubGraphID++, getLSU(SU));
     }
   }
 
@@ -351,30 +358,42 @@ public:
   void writeGraph(StringRef Name) const;
 
 private:
-  unsigned getNumSucc(const SUnit *SU, const Root &R) const;
-  unsigned getConsumersNum(const LinkedSU &LSU) const;
+  unsigned getSubgraphSuccNum(const LinkedSU &LSU) const;
+  unsigned getExternalConsumersNum(const LinkedSU &LSU) const;
   unsigned getUnitDepth(const SUnit &SU) const;
   void setUnitDepthDirty(const SUnit &SU) const;
 
-  void discoverSubgraph(Root &R);
-  void scheduleSubgraph(Root &R);
+  void discoverSubgraph(Subgraph &R);
+  void scheduleSubgraph(Subgraph &R);
   void merge();
-  bool mergeSuccessors(Root &R);
-  std::map<std::set<Root*>, unsigned> getKills(const Root &R);
-  template <typename Range> void merge(Root &R, Range &&Succs);
+  bool mergeSuccessors(Subgraph &R);
+  std::map<std::set<Subgraph*>, unsigned> getKills(const Subgraph &R);
+  template <typename Range> void merge(Subgraph &R, Range &&Succs);
   std::vector<const SUnit*> finalSchedule();
 
 
 
-  static bool isExpanded(const Root &R);
-  void writeSubgraph(raw_ostream &O, const Root &R) const;
-  void writeExpandedSubgraph(raw_ostream &O, const Root &R) const;
+  static bool isExpanded(const Subgraph &R);
+  void writeSubgraph(raw_ostream &O, const Subgraph &R) const;
+  void writeExpandedSubgraph(raw_ostream &O, const Subgraph &R) const;
   bool isEdgeHidden(const SUnit &SU, const SDep &Pred) const;
   void writeLSU(raw_ostream &O, const LinkedSU &LSU) const;
-  void writeLinks(raw_ostream &O, const Root &R) const;
-  void writeLinksExpanded(raw_ostream &O, const Root &R) const;
+  void writeLinks(raw_ostream &O, const Subgraph &R) const;
+  void writeLinksExpanded(raw_ostream &O, const Subgraph &R) const;
 };
 
+
+// returns the number of SU successors belonging to R
+unsigned GCNMinRegScheduler2::getSubgraphSuccNum(const LinkedSU &LSU) const {
+  unsigned NumSucc = 0;
+  for (const auto &SDep : LSU.SU->Succs) {
+    const auto *SuccSU = SDep.getSUnit();
+    if (!SDep.isWeak() && !SuccSU->isBoundaryNode() &&
+        getLSU(SuccSU).Parent == LSU.Parent)
+      ++NumSucc;
+  }
+  return NumSucc;
+}
 
 /// Calculates the maximal path from the node to the exit.
 unsigned GCNMinRegScheduler2::getUnitDepth(const SUnit &SU) const {
@@ -432,8 +451,8 @@ void GCNMinRegScheduler2::setUnitDepthDirty(const SUnit &SU) const {
   } while (!WorkList.empty());
 }
 
-unsigned GCNMinRegScheduler2::getConsumersNum(const LinkedSU &LSU) const {
-  DenseSet<const Root*> Cons;
+unsigned GCNMinRegScheduler2::getExternalConsumersNum(const LinkedSU &LSU) const {
+  DenseSet<const Subgraph*> Cons;
   for (auto &Succ : LSU.SU->Succs) {
     if (!Succ.isWeak() && Succ.isAssignedRegDep()) {
       auto *SuccR = getLSU(Succ.getSUnit()).Parent;
@@ -448,18 +467,18 @@ unsigned GCNMinRegScheduler2::getConsumersNum(const LinkedSU &LSU) const {
 
 std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
   // sort deepest first
-  std::sort(Roots.begin(), Roots.end(),
-    [=](const Root &R1, const Root &R2) ->bool {
+  std::sort(Subgraphs.begin(), Subgraphs.end(),
+    [=](const Subgraph &R1, const Subgraph &R2) ->bool {
     return getUnitDepth(*R1.getBottomSU()) > getUnitDepth(*R2.getBottomSU());
   });
 
-  for (auto &R : Roots) {
+  for (auto &R : Subgraphs) {
     discoverSubgraph(R);
     scheduleSubgraph(R);
-    DEBUG(R.dump(dbgs()));
+    //DEBUG(R.dump(dbgs()));
   }
 
-  DEBUG(writeGraph("subdags_original.dot"));
+  //DEBUG(writeGraph("subdags_original.dot"));
 
   merge();
 
@@ -468,7 +487,7 @@ std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
   return finalSchedule();
 }
 
-void GCNMinRegScheduler2::discoverSubgraph(Root &R) {
+void GCNMinRegScheduler2::discoverSubgraph(Subgraph &R) {
   std::vector<const SUnit*> Worklist;
   Worklist.push_back(R.getBottomSU());
 
@@ -496,14 +515,14 @@ void GCNMinRegScheduler2::discoverSubgraph(Root &R) {
 // Merging
 
 void GCNMinRegScheduler2::merge() {
-  BitVector Visited(Roots.size());
-  std::vector<unsigned> NumSuccs(Roots.size());
-  std::vector<Root*> Worklist;
+  BitVector Visited(Subgraphs.size());
+  std::vector<unsigned> NumSuccs(Subgraphs.size());
+  std::vector<Subgraph*> Worklist;
   bool Changed;
   do {
     Worklist.clear();
-    for (auto &R : Roots) {
-      if (R.List.empty())
+    for (auto &R : Subgraphs) {
+      if (R.empty())
         continue;
       if (R.Succs.empty())
         Worklist.push_back(&R);
@@ -513,17 +532,21 @@ void GCNMinRegScheduler2::merge() {
 
     Changed = false;
     while (!Changed && !Worklist.empty()) {
-      std::vector<Root*> NewWorklist;
+      std::vector<Subgraph*> NewWorklist;
       for (auto *R : Worklist)
-        for (auto &Pred : R->Preds)
+        for (auto &Pred : R->Preds) {
+          assert(NumSuccs[Pred.first->ID]);
           if (0 == --NumSuccs[Pred.first->ID])
             NewWorklist.push_back(Pred.first);
+        }
 
       Worklist = std::move(NewWorklist);
 
       for (auto *R : Worklist) {
-        if (Visited.test(R->ID))
+        if (Visited.test(R->ID)) {
+          DEBUG(dbgs() << "Skipping visited " << R->ID << '\n');
           continue;
+        }
         if (!mergeSuccessors(*R)) {
           Visited.set(R->ID);
           continue;
@@ -538,18 +561,19 @@ void GCNMinRegScheduler2::merge() {
           }
       }
     }
+    DEBUG(if (Changed) dbgs() << "Restarting merge\n");
   } while (Changed);
 }
 
-std::map<std::set<GCNMinRegScheduler2::Root*>, unsigned>
-GCNMinRegScheduler2::getKills(const Root &R) {
-  std::map<std::set<Root*>, unsigned> Kills;
+std::map<std::set<GCNMinRegScheduler2::Subgraph*>, unsigned>
+GCNMinRegScheduler2::getKills(const Subgraph &R) {
+  std::map<std::set<Subgraph*>, unsigned> Kills;
   for (auto &LSU : make_range(++R.List.begin(), R.List.end())) {
     const auto &Succs = LSU.SU->Succs;
     if (Succs.size() == 1)
       continue;
 
-    std::set<Root*> Killers;
+    std::set<Subgraph*> Killers;
     for (const auto &Succ : Succs) {
       if (!Succ.isAssignedRegDep())
         continue;
@@ -564,7 +588,8 @@ GCNMinRegScheduler2::getKills(const Root &R) {
   return Kills;
 }
 
-bool GCNMinRegScheduler2::mergeSuccessors(Root &R) {
+bool GCNMinRegScheduler2::mergeSuccessors(Subgraph &R) {
+  DEBUG(dbgs() << "Merging " << R.ID << '\n');
   bool Changed = false;
   for (const auto &K : getKills(R)) {
     unsigned InstrNum = 0;
@@ -574,150 +599,140 @@ bool GCNMinRegScheduler2::mergeSuccessors(Root &R) {
     if (InstrNum <= K.second * 2) {
       merge(R, K.first);
       Changed = true;
+      //DEBUG(dbgs() << "Merged subgraphs\n"; R.dump(dbgs()));
     }
+  }
+  if (R.ID == 0) {
+    Subgraph *X[] = { &Subgraphs[1] };
+    merge(R, X);
+    Changed = true;
+    //DEBUG(dbgs() << "Merged subgraphs\n"; R.dump(dbgs()));
   }
   return Changed;
 }
 
 template <typename Range>
-void GCNMinRegScheduler2::merge(Root &R, Range &&Succs) {
-  for (auto *Succ : Succs) {
-    for (auto &LSU : Succ->List)
-      LSU.Parent = &R;
-    R.List.splice(R.List.begin(), Succ->List);
-    R.Succs.erase(Succ);
-    for (auto &Pred : Succ->Preds) {
-      if (Pred.first != &R)
-        for(auto Reg : Pred.second)
-          R.Preds[Pred.first].insert(Reg);
+void GCNMinRegScheduler2::merge(Subgraph &SG, Range &&SGSuccs2Merge) {
+  for (auto *Mergee : SGSuccs2Merge) {
+    assert(SG.Succs.count(Mergee) == 1);
+    for (auto &LSU : Mergee->List)
+      LSU.Parent = &SG;
+    SG.List.splice(SG.List.begin(), Mergee->List);
+
+    for (auto &MrgPred : Mergee->Preds) {
+      auto &MrgPredSG = *MrgPred.first;
+      MrgPredSG.Succs.erase(Mergee);
+      if (&MrgPredSG == &SG)
+        continue;
+      for (auto Reg : MrgPred.second) {
+        SG.Preds[&MrgPredSG].insert(Reg); // insert MrgPredSG into SG Preds
+        MrgPredSG.Succs[&SG].insert(Reg); // insert SG into MrgPredSG Succs
+      }
+    }
+
+    for (auto &MrgSucc : Mergee->Succs) {
+      auto &MrgSuccSG = *MrgSucc.first;
+      MrgSuccSG.Preds.erase(Mergee);
+      for (auto Reg : MrgSucc.second) {
+        SG.Succs[&MrgSuccSG].insert(Reg); // insert MrgSuccSG into SG Succs
+        MrgSuccSG.Preds[&SG].insert(Reg); // insert SG into MrgSuccSG Preds
+      }
     }
   }
+  scheduleSubgraph(SG);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // Scheduling
 
-void GCNMinRegScheduler2::scheduleSubgraph(Root &R) {
-}
+void GCNMinRegScheduler2::scheduleSubgraph(Subgraph &R) {
+  std::vector<unsigned> NumSuccs(LSUs.size());
+  std::vector<LinkedSU*> Worklist;
 
-#if 0
-/// Manage the stack used by a reverse depth-first search over the DAG.
-class SchedDAGReverseDFS {
-  std::vector<std::pair<const SUnit *, SUnit::const_pred_iterator>> DFSStack;
-
-public:
-  bool isComplete() const { return DFSStack.empty(); }
-
-  void follow(const SUnit *SU) {
-    DFSStack.push_back(std::make_pair(SU, SU->Preds.begin()));
-  }
-  void advance() { ++DFSStack.back().second; }
-
-  const SDep *backtrack() {
-    DFSStack.pop_back();
-    return DFSStack.empty() ? nullptr : std::prev(DFSStack.back().second);
+  for (auto &LSU : R.List) {
+    if (auto NumSucc = getSubgraphSuccNum(LSU))
+      NumSuccs[LSU.getIndex()] = NumSucc;
+    else
+      Worklist.push_back(&LSU);
   }
 
-  const SUnit *getCurr() const { return DFSStack.back().first; }
+  R.List.clear();
+  while (!Worklist.empty()) {
 
-  SUnit::const_pred_iterator getPred() const { return DFSStack.back().second; }
+    std::sort(Worklist.begin(), Worklist.end(),
+      [=](const LinkedSU *LSU1, const LinkedSU *LSU2) {
+        return LSU1->SU->Latency > LSU2->SU->Latency;
+    });
 
-  SUnit::const_pred_iterator getPredEnd() const {
-    return getCurr()->Preds.end();
-  }
-};
-
-// returns the number of SU successors belonging to R
-unsigned GCNMinRegScheduler2::getNumSucc(const SUnit *SU, const Root &R) const {
-  assert(getLSU(SU).Parent == &R);
-  unsigned NumSucc = 0;
-  for (const auto &SDep : SU->Succs) {
-    const auto *SuccSU = SDep.getSUnit();
-    if (!SDep.isWeak() && !SuccSU->isBoundaryNode() && getLSU(SuccSU).Parent == &R)
-      ++NumSucc;
-  }
-  return NumSucc;
-}
-
-void GCNMinRegScheduler2::scheduleSubgraph(Root &R) {
-  if (R.List.size() < 2)
-    return;
-#ifndef NDEBUG
-  auto PrevSize = R.List.size();
-#endif
-  std::vector<unsigned> NumSucc(LSUs.size());
-  auto Tail = make_range(++R.List.begin(), R.List.end());
-  for (auto &LSU : Tail)
-    NumSucc[LSU.SU->NodeNum] = getNumSucc(LSU.SU, R);
-
-  R.List.erase(Tail.begin(), Tail.end());
-
-  SchedDAGReverseDFS DFS;
-  DFS.follow(R.getBottomSU());
-  DEBUG(R.getBottomSU()->getInstr()->print(dbgs()));
-  do {
-    // Traverse the leftmost path as far as possible.
-    while (DFS.getPred() != DFS.getPredEnd()) {
-      const auto &Pred = *DFS.getPred();
-      const auto *PredSU = Pred.getSUnit();
-      DFS.advance();
-      if (PredSU->isBoundaryNode() /* ||Pred.isWeak()*/)
-        continue;
-      auto &PredLSU = getLSU(PredSU);
-      if (PredLSU.Parent != &R || --NumSucc[PredSU->NodeNum])
-        continue;
-      R.List.push_back(PredLSU);
-      DFS.follow(PredSU);
+    for (auto *LSU : Worklist) {
+      R.List.push_back(*LSU);
     }
-    DFS.backtrack();
-  } while (!DFS.isComplete());
 
-  assert(R.List.size() == PrevSize);
+    std::vector<LinkedSU*> NewWorklist;
+    for (const auto *LSU : Worklist)
+      for (auto &Pred : LSU->SU->Preds) {
+        const auto *PredSU = Pred.getSUnit();
+        if (Pred.isWeak() || PredSU->isBoundaryNode())
+          continue;
+
+        auto &PredLSU = getLSU(PredSU);
+        assert(PredLSU.Parent != &R || NumSuccs[PredLSU.getIndex()]);
+        if (PredLSU.Parent == &R && 0 == --NumSuccs[PredLSU.getIndex()])
+          NewWorklist.push_back(&PredLSU);
+      }
+
+    Worklist = std::move(NewWorklist);
+  }
 }
-#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 // Final scheduling
 
 std::vector<const SUnit*> GCNMinRegScheduler2::finalSchedule() {
-  std::vector<unsigned> NumPreds(Roots.size());
-  for (auto &R : Roots) {
-    if (R.List.empty())
+  SmallVector<Subgraph*, 4> TopRoots;
+  std::vector<unsigned> NumPreds(Subgraphs.size());
+  for (auto &SG : Subgraphs) {
+    if (SG.empty())
       continue;
-    if (!R.Preds.empty())
-      NumPreds[R.ID] = R.Preds.size();
+    if (!SG.Preds.empty())
+      NumPreds[SG.ID] = SG.Preds.size();
+    else
+      TopRoots.push_back(&SG);
   }
   
   std::vector<const SUnit*> Schedule;
   Schedule.reserve(LSUs.size());
 
-  std::vector<Root*> Worklist;
-  Worklist.push_back(&Roots[0]);
-  do {
-    std::sort(Worklist.begin(), Worklist.end(),
-      [=](const Root *R1, const Root *R2) -> bool {
+  for (auto *TopRoot : TopRoots) {
+    std::vector<Subgraph*> Worklist;
+    Worklist.push_back(TopRoot);
+    do {
+      std::sort(Worklist.begin(), Worklist.end(),
+        [=](const Subgraph *R1, const Subgraph *R2) -> bool {
         return R1->List.size() > R2->List.size();
-    });
-    for (const auto *R : Worklist)
-      for (const auto &LSU : make_range(R->List.rbegin(), R->List.rend()))
-        Schedule.push_back(LSU.SU);
+      });
+      for (const auto *SG : Worklist)
+        for (const auto &LSU : make_range(SG->List.rbegin(), SG->List.rend()))
+          Schedule.push_back(LSU.SU);
 
-    std::vector<Root*> NewWorklist;
-    for (auto *R : Worklist)
-      for (auto &Succ : R->Succs)
-        if (0 == --NumPreds[Succ.first->ID])
-          NewWorklist.push_back(Succ.first);
+      std::vector<Subgraph*> NewWorklist;
+      for (auto *SG : Worklist)
+        for (auto &Succ : SG->Succs) {
+          assert(NumPreds[Succ.first->ID]);
+          if (0 == --NumPreds[Succ.first->ID])
+            NewWorklist.push_back(Succ.first);
+        }
 
-    Worklist = std::move(NewWorklist);
-  } while (!Worklist.empty());
-
+      Worklist = std::move(NewWorklist);
+    } while (!Worklist.empty());
+  }
   return Schedule;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // Dumping
 
-void GCNMinRegScheduler2::Root::dump(raw_ostream &O) const {
+void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O) const {
   O << "Subgraph " << ID << '\n';
   for (const auto &LSU : make_range(List.rbegin(), List.rend())) {
     LSU.SU->getInstr()->print(O);
@@ -725,7 +740,7 @@ void GCNMinRegScheduler2::Root::dump(raw_ostream &O) const {
   O << '\n';
 }
 
-bool GCNMinRegScheduler2::isExpanded(const Root &R) {
+bool GCNMinRegScheduler2::isExpanded(const Subgraph &R) {
   static const DenseSet<unsigned> Expand = 
      { 0, 1, 2, 4, 6 };
     //{ 0, 1, 44, 45 };
@@ -760,7 +775,7 @@ static const char *getDepColor(SDep::Kind K) {
   return "";
 }
 
-void GCNMinRegScheduler2::writeSubgraph(raw_ostream &O, const Root &R) const {
+void GCNMinRegScheduler2::writeSubgraph(raw_ostream &O, const Subgraph &R) const {
   auto SubGraphID = R.ID;
   O << "\tSubgraph" << SubGraphID
     << " [shape=record, style=\"filled\""
@@ -772,7 +787,7 @@ void GCNMinRegScheduler2::writeSubgraph(raw_ostream &O, const Root &R) const {
     << "}\"];\n";
 }
 
-void GCNMinRegScheduler2::writeLinks(raw_ostream &O, const Root &R) const {
+void GCNMinRegScheduler2::writeLinks(raw_ostream &O, const Subgraph &R) const {
   for (const auto &P : R.Preds) {
     O << "\tSubgraph" << R.ID << " -> ";
     auto &PredR = *P.first;
@@ -800,7 +815,7 @@ static void writeSUtoPredSULink(raw_ostream &O, const SUnit &SU, const SDep &Pre
 }
 
 void GCNMinRegScheduler2::writeLSU(raw_ostream &O, const LinkedSU &LSU) const {
-  auto NumCons = getConsumersNum(LSU);
+  auto NumCons = getExternalConsumersNum(LSU);
   const auto &SU = *LSU.SU;
   O << "\t\t";
   O << "SU" << SU.NodeNum
@@ -815,7 +830,7 @@ void GCNMinRegScheduler2::writeLSU(raw_ostream &O, const LinkedSU &LSU) const {
   O << "}\"];\n";
 }
 
-void GCNMinRegScheduler2::writeExpandedSubgraph(raw_ostream &O, const Root &R) const {
+void GCNMinRegScheduler2::writeExpandedSubgraph(raw_ostream &O, const Subgraph &R) const {
   auto SubGraphID = R.ID;
   O << "\tsubgraph cluster_Subgraph" << SubGraphID << " {\n";
   O << "\t\tlabel = \"Subgraph" << SubGraphID << "\";\n";
@@ -842,7 +857,7 @@ void GCNMinRegScheduler2::writeExpandedSubgraph(raw_ostream &O, const Root &R) c
   O << "\t}\n";
 }
 
-void GCNMinRegScheduler2::writeLinksExpanded(raw_ostream &O, const Root &R) const {
+void GCNMinRegScheduler2::writeLinksExpanded(raw_ostream &O, const Subgraph &R) const {
   for (const auto &LSU : R.List) {
     if (isSUHidden(*LSU.SU))
       continue;
@@ -857,7 +872,7 @@ void GCNMinRegScheduler2::writeLinksExpanded(raw_ostream &O, const Root &R) cons
         if (!isEdgeHidden(*LSU.SU, Pred))
           writeSUtoPredSULink(O, *LSU.SU, Pred);
       } else {
-        O << "\tSU" << LSU.SU->NodeNum << " -> Subgraph" << DepR->ID;
+        O << "\tSU" << LSU.getIndex() << " -> Subgraph" << DepR->ID;
         O << '[' << getDepColor(Pred.getKind()) << "];\n";
       }
     }
@@ -880,14 +895,14 @@ void GCNMinRegScheduler2::writeGraph(StringRef Name) const {
        "\tranksep=\"equally\";\n"
        "\tnewrank=\"true\";\n";
   // write subgraphs
-  for (auto &R : Roots) {
+  for (auto &R : Subgraphs) {
     if (isExpanded(R))
       writeExpandedSubgraph(O, R);
     else
       writeSubgraph(O, R);
   }
   // write links
-  for (auto &R : Roots) {
+  for (auto &R : Subgraphs) {
     if (R.Preds.empty())
       continue;
     if (isExpanded(R))

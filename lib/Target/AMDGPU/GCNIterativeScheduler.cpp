@@ -182,6 +182,40 @@ void GCNIterativeScheduler::printSchedRP(raw_ostream &OS,
   OS << "RP after:  ";
   After.print(OS, &ST);
 }
+
+template <typename Range>
+LLVM_DUMP_METHOD
+bool GCNIterativeScheduler::validateSchedule(const Region &R,
+                                             const Range &Schedule) {
+  std::vector<unsigned> NumPreds(SUnits.size());
+  for (const auto &SU : SUnits)
+    NumPreds[SU.NodeNum] = SU.NumPredsLeft;
+
+  bool Res = true;
+  unsigned NumInstr = 0;
+  for (const auto *SU : Schedule) {
+    ++NumInstr;
+    if (NumPreds[SU->NodeNum] != 0) {
+      dbgs() << "ERROR: unsatisfied preds: " << NumPreds[SU->NodeNum] << ' ';
+      SU->getInstr()->print(dbgs());
+      Res = false;
+    }
+    for (const auto &Succ : SU->Succs) {
+      const auto &SuccSU = *Succ.getSUnit();
+      if (!Succ.isWeak() && !SuccSU.isBoundaryNode()) {
+        assert(NumPreds[SuccSU.NodeNum]);
+        --NumPreds[SuccSU.NodeNum];
+      }
+    }
+  }
+  if (NumInstr != R.NumRegionInstrs) {
+    dbgs() << "ERROR: schedule length mismatch: "
+           << R.NumRegionInstrs << " before, "
+           << NumInstr << " after\n";
+    Res = false;
+  }
+  return Res;
+}
 #endif
 
 std::string GCNIterativeScheduler::Region::getName(const LiveIntervals *LIS)
@@ -678,7 +712,7 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
   sortRegionsByPressure(TgtOcc);
 
   auto MaxPressure = Regions.front()->MaxPressure;
-  for (auto R : Regions) {
+  for (auto *R : Regions) {
     DEBUG(
       dbgs() << "Scheduling\n";
       printLivenessInfo(dbgs(), R->Begin, R->End, LIS);
@@ -701,7 +735,8 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
     const auto MinSchedule = makeMinRegSchedule(DAG.getTopRoots(),
                                                 DAG.getBottomRoots(), *this);
     DEBUG(dbgs() << "\n=== End scheduling " << R->getName(LIS) << '\n');
-    
+    assert(validateSchedule(*R, MinSchedule));
+
     const auto RP = getSchedulePressure(*R, MinSchedule);
     LLVM_DEBUG(if (R->MaxPressure.less(ST, RP, TgtOcc)) {
       dbgs() << "\nWarning: Pressure becomes worse after minreg!";
@@ -753,7 +788,8 @@ void GCNIterativeScheduler::scheduleILP(
         LLVM_DEBUG(dbgs() << ", scheduling minimal register\n");
         scheduleBest(*R);
       }
-    } else {
+    }
+    else {
       scheduleRegion(*R, ILPSchedule, RP);
       LLVM_DEBUG(printSchedResult(dbgs(), R, RP));
       FinalOccupancy = std::min(FinalOccupancy, RP.getOccupancy(ST));
