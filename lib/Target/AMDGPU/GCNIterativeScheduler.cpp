@@ -212,7 +212,17 @@ bool GCNIterativeScheduler::validateSchedule(const Region &R,
     dbgs() << "ERROR: schedule length mismatch: "
            << R.NumRegionInstrs << " before, "
            << NumInstr << " after\n";
-    Res = false;
+    DenseMap<const MachineInstr*, unsigned> IC;
+    for (const auto &MI : make_range(R.Begin, R.End))
+      ++IC[&MI];
+    for (const auto *SU : Schedule)
+      ++IC[SU->getInstr()];
+    for(const auto &P : IC)
+      if (P.second == 1) {
+        dbgs() << "Missing ";
+        P.first->print(dbgs());
+      }
+    //Res = false; // TODO: uncomment this
   }
   return Res;
 }
@@ -711,6 +721,8 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
   const auto TgtOcc = MFI->getOccupancy();
   sortRegionsByPressure(TgtOcc);
 
+  DEBUG(printRegions(dbgs()));
+
   auto MaxPressure = Regions.front()->MaxPressure;
   for (auto *R : Regions) {
     DEBUG(
@@ -739,7 +751,7 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
 
     const auto RP = getSchedulePressure(*R, MinSchedule);
     LLVM_DEBUG(if (R->MaxPressure.less(ST, RP, TgtOcc)) {
-      dbgs() << "\nWarning: Pressure becomes worse after minreg!";
+      dbgs() << "\nWarning: Pressure becomes worse after minreg!\n";
       printSchedRP(dbgs(), R->MaxPressure, RP);
     });
 
