@@ -114,6 +114,7 @@ public:
   const decltype(LiveRegs) &getLiveRegs() const { return LiveRegs; }
   const MachineInstr *getLastTrackedMI() const { return LastTrackedMI; }
 
+  GCNRegPressure getPressure() const { return CurPressure; }
   void clearMaxPressure() { MaxPressure.clear(); }
 
   // returns MaxPressure, resetting it
@@ -202,6 +203,13 @@ inline GCNRPTracker::LiveRegSet getLiveRegsBefore(const MachineInstr &MI,
   return getLiveRegs(LIS.getInstructionIndex(MI).getBaseIndex(), LIS,
                      MI.getParent()->getParent()->getRegInfo());
 }
+
+LaneBitmask getDefRegMask(const MachineOperand &MO,
+                          const MachineRegisterInfo &MRI);
+
+LaneBitmask getUsedRegMask(const MachineOperand &MO,
+                           const MachineRegisterInfo &MRI,
+                           const LiveIntervals &LIS);
 
 GCNRPTracker::LiveRegSet getLiveThroughRegs(const MachineInstr &FirstMI,
                                             const MachineInstr &LastMI,

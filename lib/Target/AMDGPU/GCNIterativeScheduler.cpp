@@ -78,8 +78,11 @@ bool SchedDFSResult2::isInTreeOrDescendant(const SUnit *Node,
 namespace llvm {
 
 std::vector<const SUnit *> makeMinRegSchedule(ArrayRef<const SUnit*> TopRoots,
-                                              ArrayRef<const SUnit*> BotRoots,
                                               const ScheduleDAG &DAG);
+
+std::vector<const SUnit *> makeMinRegSchedule2(ArrayRef<const SUnit*> BotRoots,
+                                               const GCNRPTracker::LiveRegSet &LiveOutRegs,
+                                               const ScheduleDAGMI &DAG);
 
   std::vector<const SUnit*> makeGCNILPScheduler(ArrayRef<const SUnit*> BotRoots,
     const ScheduleDAG &DAG);
@@ -638,8 +641,7 @@ unsigned GCNIterativeScheduler::tryMaximizeOccupancy(unsigned TargetOcc) {
                printLivenessInfo(dbgs(), R->Begin, R->End, LIS));
 
     BuildDAG DAG(*R, *this);
-    const auto MinSchedule = makeMinRegSchedule(DAG.getTopRoots(),
-                                                DAG.getBottomRoots(), *this);
+    const auto MinSchedule = makeMinRegSchedule(DAG.getTopRoots(), *this);
     const auto MaxRP = getSchedulePressure(*R, MinSchedule);
     LLVM_DEBUG(dbgs() << "Occupancy improvement attempt:\n";
                printSchedRP(dbgs(), R->MaxPressure, MaxRP));
@@ -744,8 +746,9 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
     //DEBUG(dumpSUs());
 
     DEBUG(dbgs() << "\n=== Begin scheduling " << R->getName(LIS) << '\n');
-    const auto MinSchedule = makeMinRegSchedule(DAG.getTopRoots(),
-                                                DAG.getBottomRoots(), *this);
+    const auto MinSchedule = makeMinRegSchedule2(DAG.getBottomRoots(),
+                                                 getRegionLiveOuts(*R),
+                                                 *this);
     DEBUG(dbgs() << "\n=== End scheduling " << R->getName(LIS) << '\n');
     assert(validateSchedule(*R, MinSchedule));
 

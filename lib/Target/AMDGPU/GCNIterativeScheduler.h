@@ -114,6 +114,10 @@ protected:
   class BuildDAG;
   class OverrideLegacyStrategy;
 
+  GCNRPTracker::LiveRegSet getRegionLiveOuts(const Region &R) const {
+    return getLiveRegsAfter(*std::prev(R.End), *LIS);
+  }
+
   template <typename Range>
   GCNRegPressure getSchedulePressure(const Region &R,
                                      Range &&Schedule) const;

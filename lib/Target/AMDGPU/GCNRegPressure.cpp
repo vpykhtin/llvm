@@ -190,8 +190,8 @@ void GCNRegPressure::print(raw_ostream &OS, const GCNSubtarget *ST) const {
 }
 #endif
 
-static LaneBitmask getDefRegMask(const MachineOperand &MO,
-                                 const MachineRegisterInfo &MRI) {
+LaneBitmask llvm::getDefRegMask(const MachineOperand &MO,
+                                const MachineRegisterInfo &MRI) {
   assert(MO.isDef() && MO.isReg() &&
     TargetRegisterInfo::isVirtualRegister(MO.getReg()));
 
@@ -203,9 +203,9 @@ static LaneBitmask getDefRegMask(const MachineOperand &MO,
     MRI.getTargetRegisterInfo()->getSubRegIndexLaneMask(MO.getSubReg());
 }
 
-static LaneBitmask getUsedRegMask(const MachineOperand &MO,
-                                  const MachineRegisterInfo &MRI,
-                                  const LiveIntervals &LIS) {
+LaneBitmask llvm::getUsedRegMask(const MachineOperand &MO,
+                                 const MachineRegisterInfo &MRI,
+                                 const LiveIntervals &LIS) {
   assert(MO.isUse() && MO.isReg() &&
          TargetRegisterInfo::isVirtualRegister(MO.getReg()));
 

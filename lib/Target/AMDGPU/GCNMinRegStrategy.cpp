@@ -30,7 +30,7 @@ using namespace llvm;
 
 #define DEBUG_TYPE "machine-scheduler"
 
-#if 0
+#if 1
 
 namespace {
 
@@ -299,19 +299,33 @@ class GCNMinRegScheduler2 {
       assert(!SU->isBoundaryNode());
       return SU->NodeNum;
     }
+
+    bool dependsOn(const Subgraph &SG,
+                   const GCNMinRegScheduler2 &LSUSource) const;
   };
 
+  class Merge;
   struct Subgraph : ilist_node<Subgraph> {
     unsigned ID;
     simple_ilist<LinkedSU> List;
     DenseMap<Subgraph*, DenseSet<unsigned>> Preds;
     DenseMap<Subgraph*, DenseSet<unsigned>> Succs;
+    GCNRPTracker::LiveRegSet LiveOutRegs;
 
-    Subgraph(unsigned ID_, LinkedSU &Bot) : ID(ID_) { add(Bot); }
+    Subgraph(unsigned ID_,
+             LinkedSU &Bot,
+             const GCNRPTracker::LiveRegSet &RegionLiveOutRegs,
+             const MachineRegisterInfo &MRI)
+      : ID(ID_) {
+      add(Bot, RegionLiveOutRegs, MRI);
+    }
 
-    void add(LinkedSU &LSU) {
+    void add(LinkedSU &LSU,
+             const GCNRPTracker::LiveRegSet &RegionLiveOutRegs,
+             const MachineRegisterInfo &MRI) {
       List.push_back(LSU);
       LSU.Parent = this;
+      addLiveOut(LSU, RegionLiveOutRegs, MRI);
     }
 
     const SUnit *getBottomSU() const { return List.front().SU; }
@@ -327,12 +341,7 @@ class GCNMinRegScheduler2 {
     }
 
     typedef std::map<std::set<GCNMinRegScheduler2::Subgraph*>, unsigned> KillInfo;
-
     const KillInfo &getKills(const GCNMinRegScheduler2 &LSUSource) const;
-
-    void merge(Subgraph *Mergee);
-
-    void dump(raw_ostream &O) const;
 
     void updateOrderIndexes() {
       unsigned I = 0;
@@ -340,11 +349,67 @@ class GCNMinRegScheduler2 {
         LSU.SGOrderIndex = I++;
     }
 
+    void dump(raw_ostream &O) const;
+
+  private:
+    void addLiveOut(LinkedSU &LSU,
+                    const GCNRPTracker::LiveRegSet &RegionLiveOutRegs,
+                    const MachineRegisterInfo &MRI);
+
+    friend class GCNMinRegScheduler2::Merge;
+
+    void mergeSchedule(const DenseSet<Subgraph*> &Mergees,
+                       GCNMinRegScheduler2 &LSUSource);
+
+    template <typename Range>
+    void commitMerge(const Range &Mergees);
+
+    void patchDepsAfterMerge(Subgraph *Mergee);
+
+    void rollbackMerge();
+
   private:
     mutable KillInfo Kills;
   };
 
+  class Merge {
+    Subgraph &SG;
+    DenseSet<Subgraph*> Mergees;
+    GCNMinRegScheduler2 &LSUSource;
+    bool Cancelled = false;
+  public:
+    template <typename Range>
+    Merge(Subgraph &SG_,
+          Range &&Mergees_,
+          GCNMinRegScheduler2 &LSUSource_)
+      : SG(SG_)
+      , LSUSource(LSUSource_) {
+      for (auto *M : Mergees_)
+        Mergees.insert(M);
+      SG.mergeSchedule(Mergees, LSUSource);
+    }
+    ~Merge() {
+      if (!Cancelled)
+        commit();
+    }
+    void commit() {
+      SG.commitMerge(Mergees);
+      for (auto *M : Mergees)
+        LSUSource.Subgraphs.remove(*M);
+    }
+    void rollback() {
+      if (!Cancelled) {
+        SG.rollbackMerge();
+        Cancelled = true;
+      }
+    }
+  };
+
+  const LiveIntervals &LIS;
+  const MachineRegisterInfo &MRI;
+  const GCNRPTracker::LiveRegSet &LiveOutRegs;
   std::vector<LinkedSU> LSUStorage;
+
   std::vector<Subgraph> SGStorage;
   simple_ilist<Subgraph> Subgraphs;
 
@@ -361,16 +426,8 @@ class GCNMinRegScheduler2 {
 
 public:
   GCNMinRegScheduler2(ArrayRef<const SUnit*> BotRoots,
-                      const ScheduleDAG &DAG)
-    : LSUStorage(DAG.SUnits.begin(), DAG.SUnits.end())
-    , UnitDepth(DAG.SUnits.size(), -1) {
-    SGStorage.reserve(BotRoots.size());
-    unsigned SubGraphID = 0;
-    for (auto *SU : BotRoots) {
-      SGStorage.emplace_back(SubGraphID++, getLSU(SU));
-      Subgraphs.push_back(SGStorage.back());
-    }
-  }
+                      const GCNRPTracker::LiveRegSet &LORegs,
+                      const ScheduleDAGMI &DAG);
 
   std::vector<const SUnit*> schedule();
 
@@ -382,22 +439,13 @@ private:
   unsigned getUnitDepth(const SUnit &SU) const;
   void setUnitDepthDirty(const SUnit &SU) const;
 
+  DenseMap<Subgraph*, LinkedSU*> getHighestSuccs(LinkedSU &LSU,
+    const DenseSet<Subgraph*> &SGSet);
+
   void discoverSubgraph(Subgraph &R);
   void scheduleSubgraph(Subgraph &R);
   void merge();
-
-  template <typename Range>
-  void merge(Subgraph &SG, Range &&SGSuccs2Merge) {
-    for (auto *Mergee : SGSuccs2Merge) {
-      SG.merge(Mergee);
-      Subgraphs.remove(*Mergee);
-    }
-    scheduleSubgraph(SG);
-  }
-
   std::vector<const SUnit*> finalSchedule();
-
-
 
   static bool isExpanded(const Subgraph &R);
   void writeSubgraph(raw_ostream &O, const Subgraph &R) const;
@@ -408,12 +456,52 @@ private:
   void writeLinksExpanded(raw_ostream &O, const Subgraph &R) const;
 };
 
-void GCNMinRegScheduler2::Subgraph::merge(Subgraph *Mergee) {
-  assert(Succs.count(Mergee) == 1);
-  for (auto &LSU : Mergee->List)
-    LSU.Parent = this;
-  List.splice(List.begin(), Mergee->List);
+bool GCNMinRegScheduler2::LinkedSU::dependsOn(const Subgraph &SG,
+  const GCNMinRegScheduler2 &LSUSource) const {
+  for (const auto &Pred : SU->Preds) {
+    if (Pred.isWeak() || Pred.getSUnit()->isBoundaryNode())
+      continue;
+    if (LSUSource.getLSU(Pred.getSUnit()).Parent == &SG)
+      return true;
+  }
+  return false;
+}
 
+void GCNMinRegScheduler2::Subgraph::addLiveOut(LinkedSU &LSU,
+  const GCNRPTracker::LiveRegSet &RegionLiveOutRegs,
+  const MachineRegisterInfo &MRI) {
+  for (const auto &MO : LSU.SU->getInstr()->defs()) {
+    if (!MO.isReg() || !TargetRegisterInfo::isVirtualRegister(MO.getReg()) ||
+      MO.isDead())
+      continue;
+
+    auto LO = RegionLiveOutRegs.find(MO.getReg());
+    if (LO == RegionLiveOutRegs.end())
+      continue;
+
+    LaneBitmask LiveMask = LO->second & getDefRegMask(MO, MRI);
+    if (LiveMask.any())
+      LiveOutRegs[MO.getReg()] |= LiveMask;
+  }
+}
+
+template <typename Range>
+void GCNMinRegScheduler2::Subgraph::commitMerge(const Range &Mergees) {
+  // set ownership on merged items
+  for (auto &LSU : List)
+    LSU.Parent = this;
+
+  for (auto *Mergee : Mergees) {
+    // merge liveouts
+    for (const auto &LO : Mergee->LiveOutRegs)
+      LiveOutRegs[LO.first] |= LO.second;
+
+    patchDepsAfterMerge(Mergee);
+  }
+}
+
+void GCNMinRegScheduler2::Subgraph::patchDepsAfterMerge(Subgraph *Mergee) {
+  assert(Succs.count(Mergee) == 1);
   for (auto &MrgPred : Mergee->Preds) {
     auto *MrgPredSG = MrgPred.first;
     MrgPredSG->Succs.erase(Mergee);
@@ -425,7 +513,6 @@ void GCNMinRegScheduler2::Subgraph::merge(Subgraph *Mergee) {
       MrgPredSG->Succs[this].insert(Reg); // insert SG into MrgPredSG Succs
     }
   }
-
   for (auto &MrgSucc : Mergee->Succs) {
     auto *MrgSuccSG = MrgSucc.first;
     MrgSuccSG->Preds.erase(Mergee);
@@ -436,14 +523,94 @@ void GCNMinRegScheduler2::Subgraph::merge(Subgraph *Mergee) {
   }
 }
 
+void GCNMinRegScheduler2::Subgraph::rollbackMerge() {
+
+}
+
+DenseMap<GCNMinRegScheduler2::Subgraph*, GCNMinRegScheduler2::LinkedSU*>
+GCNMinRegScheduler2::getHighestSuccs(LinkedSU &LSU,
+                                     const DenseSet<Subgraph*> &SGSet) {
+  DenseMap<Subgraph*, LinkedSU*> HighestSucc;
+  for (const auto &Succ : LSU.SU->Succs) {
+    if (Succ.isWeak() || Succ.getSUnit()->isBoundaryNode())
+      continue;
+    auto &SuccLSU = getLSU(Succ.getSUnit());
+    if (LSU.Parent == SuccLSU.Parent || !SGSet.count(SuccLSU.Parent))
+      continue;
+    auto &H = HighestSucc[SuccLSU.Parent];
+    if (!H || H->SGOrderIndex < SuccLSU.SGOrderIndex)
+      H = &SuccLSU;
+  }
+  return HighestSucc;
+}
+
+void GCNMinRegScheduler2::Subgraph::mergeSchedule(const DenseSet<Subgraph*> &Mergees,
+                                                  GCNMinRegScheduler2 &LSUSource) {
+  DenseMap<Subgraph*, std::pair<GCNRegPressure, GCNUpwardRPTracker>> RP;
+
+  updateOrderIndexes();
+  for (auto *M : Mergees) {
+    M->updateOrderIndexes();
+    GCNUpwardRPTracker RPT(LSUSource.LIS);
+    RPT.reset(*M->getBottomSU()->getInstr(), &M->LiveOutRegs);
+    auto OutRP = RPT.getPressure();
+    RP.insert(std::make_pair(M, std::make_pair(OutRP, std::move(RPT))));
+  }
+
+  for (auto &LSU : List) {
+    if (LSU.SU->Succs.size() <= 1) // shortcut
+      continue;
+
+    const auto HighestSuccs = LSUSource.getHighestSuccs(LSU, Mergees);
+    for (auto &P : HighestSuccs) {
+      auto *Mergee = P.first;
+      auto &MergeeList = Mergee->List;
+      auto *MergeeHighestLSU = P.second;
+      // check if LSU already merged
+      if (MergeeList.empty() ||
+          MergeeHighestLSU->SGOrderIndex < MergeeList.front().SGOrderIndex)
+        continue;
+
+      auto &RPInfo = RP.find(Mergee)->second;
+      auto &RPT = RPInfo.second;
+      auto I = std::next(MergeeHighestLSU->getIterator());
+      for (auto &MrgLSU : make_range(MergeeList.begin(), I))
+        RPT.recede(*MrgLSU.SU->getInstr());
+
+      RPT.recede(*LSU.SU->getInstr());
+
+      const auto &OutRP = RPInfo.first;
+      auto CurRP = RPT.getPressure();
+      while (I != MergeeList.end() &&
+             !I->dependsOn(*this, LSUSource) &&
+             (CurRP.getVGPRNum() > OutRP.getVGPRNum() ||
+              CurRP.getSGPRNum() > OutRP.getSGPRNum())) {
+        RPT.recede(*I->SU->getInstr());
+        CurRP = RPT.getPressure();
+        ++I;
+      }
+
+      List.splice(LSU.getIterator(), MergeeList, MergeeList.begin(), I);
+    }
+  }
+  // merge in leftovers
+  for (auto *MSG : Mergees) {
+    if (!MSG->empty())
+      List.splice(List.end(), MSG->List);
+  }
+}
+
+
+
+
 const GCNMinRegScheduler2::Subgraph::KillInfo
 &GCNMinRegScheduler2::Subgraph::getKills(const GCNMinRegScheduler2 &LSUSource) const {
   if (!Kills.empty())
     return Kills;
 
-  for (auto &LSU : make_range(++List.begin(), List.end())) {
+  for (auto &LSU : List) {
     const auto &Succs = LSU.SU->Succs;
-    if (Succs.size() == 1)
+    if (Succs.size() <= 1)
       continue;
 
     std::set<Subgraph*> Killers;
@@ -543,6 +710,22 @@ unsigned GCNMinRegScheduler2::getExternalConsumersNum(const LinkedSU &LSU) const
 
 ///////////////////////////////////////////////////////////////////////////////
 
+GCNMinRegScheduler2::GCNMinRegScheduler2(ArrayRef<const SUnit*> BotRoots,
+  const GCNRPTracker::LiveRegSet &LORegs,
+  const ScheduleDAGMI &DAG)
+  : LIS(*DAG.getLIS())
+  , MRI(DAG.MRI)
+  , LiveOutRegs(LORegs)
+  , LSUStorage(DAG.SUnits.begin(), DAG.SUnits.end())
+  , UnitDepth(DAG.SUnits.size(), -1) {
+  SGStorage.reserve(BotRoots.size());
+  unsigned SubGraphID = 0;
+  for (auto *SU : BotRoots) {
+    SGStorage.emplace_back(SubGraphID++, getLSU(SU), LiveOutRegs, MRI);
+    Subgraphs.push_back(SGStorage.back());
+  }
+}
+
 std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
   // sort deepest first
   Subgraphs.sort([=](const Subgraph &R1, const Subgraph &R2) ->bool {
@@ -552,10 +735,11 @@ std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
   for (auto &R : Subgraphs) {
     discoverSubgraph(R);
     scheduleSubgraph(R);
+    R.updateOrderIndexes();
     //DEBUG(R.dump(dbgs()));
   }
 
-  //DEBUG(writeGraph("subdags_original.dot"));
+  DEBUG(writeGraph("subdags_original.dot"));
 
   merge();
 
@@ -577,7 +761,7 @@ void GCNMinRegScheduler2::discoverSubgraph(Subgraph &R) {
         continue;
       auto &LSU = getLSU(P.getSUnit());
       if (!LSU.Parent) {
-        R.add(LSU);
+        R.add(LSU, LiveOutRegs, MRI);
         Worklist.push_back(LSU.SU);
       } else if (LSU.Parent != &R) { // cross edge detected
         auto Reg = P.isAssignedRegDep() ? P.getReg() : 0;
@@ -608,10 +792,8 @@ void GCNMinRegScheduler2::merge() {
           InstrNum += SuccSG->List.size();
         assert(InstrNum > 0);
         if (InstrNum <= K.second * 2) {
-        //if (true) {
-          //DEBUG(dbgs() << "Merging " << SG.ID << "\n");
-          std::vector<Subgraph*> Copy(K.first.begin(), K.first.end());
-          merge(SG, Copy);
+          DEBUG(dbgs() << "Merging " << SG.ID << "\n");
+          Merge(SG, K.first, *this);
           Changed = true;
           break;
         }
@@ -620,8 +802,20 @@ void GCNMinRegScheduler2::merge() {
     }
   } while (Changed);
 
+#if 1
   Subgraph *SG1[] = { &SGStorage[1] };
-  merge(SGStorage[0], SG1);
+  Merge(SGStorage[0], SG1, *this);
+#endif
+
+#if 1
+  auto &SG0 = SGStorage[0];
+  std::vector<Subgraph*> V;
+  for (auto &Succ : SG0.Succs)
+    if (Succ.first->ID==2)
+      V.push_back(Succ.first);
+  Merge(SG0, V, *this);
+  SG0.dump(dbgs());
+#endif
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -721,11 +915,15 @@ void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O) const {
   O << '\n';
 }
 
+//static const bool GraphScheduleMode = true;
+static const bool GraphScheduleMode = false;
+
 bool GCNMinRegScheduler2::isExpanded(const Subgraph &R) {
-  static const DenseSet<unsigned> Expand = 
-     { 0, 1, 2, 4, 6 };
+  static const DenseSet<unsigned> Expand =
+    // { 0, 1, 2, 4, 6 };
     //{ 0, 1, 44, 45 };
-    // { };
+     { 0, 1, 2 };
+   //{ 0 };
 
   return Expand.count(R.ID) > 0 || (R.List.size() <= 2);
 }
@@ -800,7 +998,8 @@ void GCNMinRegScheduler2::writeLSU(raw_ostream &O, const LinkedSU &LSU) const {
   const auto &SU = *LSU.SU;
   O << "\t\t";
   O << "SU" << SU.NodeNum
-    << " [shape = record, style = \"filled\", rank=" << getUnitDepth(SU);
+    << " [shape = record, style = \"filled\", rank="
+    << (GraphScheduleMode ? LSU.SGOrderIndex : getUnitDepth(SU));
   if (NumCons > 0)
     O << ", color = green";
   O << ", label = \"{SU" << SU.NodeNum;
@@ -827,12 +1026,27 @@ void GCNMinRegScheduler2::writeExpandedSubgraph(raw_ostream &O, const Subgraph &
       continue;
     for (const auto &Pred : SU.Preds) {
       if (Pred.isWeak() ||
-          isSUHidden(*Pred.getSUnit()) ||
-          getLSU(Pred.getSUnit()).Parent != &R)
+        isSUHidden(*Pred.getSUnit()) ||
+        getLSU(Pred.getSUnit()).Parent != &R)
         continue;
       if (!isEdgeHidden(SU, Pred)) {
         O << '\t'; writeSUtoPredSULink(O, SU, Pred);
       }
+    }
+  }
+  if (GraphScheduleMode) {
+    // dot ingores rank between nodes without edges, so add an invisible edge
+    // between consequent schedule units
+    const LinkedSU *PrevLSU = nullptr;
+    for (const auto &LSU : R.List) {
+      if (isSUHidden(*LSU.SU))
+        continue;
+      if (PrevLSU) {
+        O << "\t\tSU" << PrevLSU->getNodeNum()
+          << "->SU" << LSU.getNodeNum()
+          << " [style=invis];\n";
+      }
+      PrevLSU = &LSU;
     }
   }
   O << "\t}\n";
@@ -899,9 +1113,14 @@ void GCNMinRegScheduler2::writeGraph(StringRef Name) const {
 namespace llvm {
 
 std::vector<const SUnit*> makeMinRegSchedule(ArrayRef<const SUnit*> TopRoots,
-                                             ArrayRef<const SUnit*> BotRoots,
                                              const ScheduleDAG &DAG) {
-  return GCNMinRegScheduler2(BotRoots, DAG).schedule();
+  return GCNMinRegScheduler().schedule(TopRoots, DAG);
+}
+
+std::vector<const SUnit*> makeMinRegSchedule2(ArrayRef<const SUnit*> BotRoots,
+                                              const GCNRPTracker::LiveRegSet &LiveOutRegs,
+                                              const ScheduleDAGMI &DAG) {
+  return GCNMinRegScheduler2(BotRoots, LiveOutRegs, DAG).schedule();
 }
 
 } // end namespace llvm
