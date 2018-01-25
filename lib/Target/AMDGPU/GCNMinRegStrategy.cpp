@@ -24,6 +24,7 @@
 #include <cassert>
 #include <cstdint>
 #include <limits>
+#include <queue>
 #include <vector>
 
 using namespace llvm;
@@ -292,6 +293,13 @@ class GCNMinRegScheduler2 {
     const SUnit * const SU;
     Subgraph *Parent = nullptr;
     unsigned SGOrderIndex;
+    // HoldGroup sign:
+    // > 0 - LSU was initially selected into the holding group
+    // < 0 - LSU is the predecessor of groupped LSU
+    int HoldGroup;
+
+    const SUnit *operator->() const { return SU; }
+    const SUnit *operator->() { return SU; }
 
     LinkedSU(const SUnit &SU_) : SU(&SU_) {}
 
@@ -443,7 +451,11 @@ private:
     const DenseSet<Subgraph*> &SGSet);
 
   void discoverSubgraph(Subgraph &R);
-  void scheduleSubgraph(Subgraph &R);
+  void scheduleSGWide(Subgraph &R);
+
+  struct scheduleBefore;
+  void scheduleSG(Subgraph &R);
+
   void merge();
   std::vector<const SUnit*> finalSchedule();
 
@@ -734,7 +746,7 @@ std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
 
   for (auto &R : Subgraphs) {
     discoverSubgraph(R);
-    scheduleSubgraph(R);
+    scheduleSGWide(R);
     R.updateOrderIndexes();
     //DEBUG(R.dump(dbgs()));
   }
@@ -807,7 +819,7 @@ void GCNMinRegScheduler2::merge() {
   Merge(SGStorage[0], SG1, *this);
 #endif
 
-#if 1
+#if 0
   auto &SG0 = SGStorage[0];
   std::vector<Subgraph*> V;
   for (auto &Succ : SG0.Succs)
@@ -821,7 +833,7 @@ void GCNMinRegScheduler2::merge() {
 ///////////////////////////////////////////////////////////////////////////////
 // Scheduling
 
-void GCNMinRegScheduler2::scheduleSubgraph(Subgraph &R) {
+void GCNMinRegScheduler2::scheduleSGWide(Subgraph &R) {
   std::vector<unsigned> NumSuccs(LSUStorage.size());
   std::vector<LinkedSU*> Worklist;
 
@@ -858,6 +870,78 @@ void GCNMinRegScheduler2::scheduleSubgraph(Subgraph &R) {
       }
 
     Worklist = std::move(NewWorklist);
+  }
+}
+
+struct GCNMinRegScheduler2::scheduleBefore {
+  bool operator()(const LinkedSU *LSU1, const LinkedSU *LSU2) {
+    if (LSU1->HoldGroup != LSU2->HoldGroup)
+      return LSU1->HoldGroup > LSU2->HoldGroup;
+    return false;
+  }
+};
+
+void GCNMinRegScheduler2::scheduleSG(Subgraph &R) {
+  std::vector<unsigned> NumSuccs(LSUStorage.size());
+  std::vector<LinkedSU*> BotRoots;
+  std::vector<unsigned> HGNumMembers;
+  BotRoots.reserve(16);
+  HGNumMembers.reserve(16);
+  for (auto &LSU : R.List) {
+    if (LSU.HoldGroup) {
+      assert(LSU.HoldGroup > 0);
+      HGNumMembers.resize(
+        std::max((unsigned)LSU.HoldGroup + 1, HGNumMembers.size()));
+      ++HGNumMembers[LSU.HoldGroup];
+    }
+    if (auto NumSucc = getSubgraphSuccNum(LSU))
+      NumSuccs[LSU.getNodeNum()] = NumSucc;
+    else
+      BotRoots.push_back(&LSU);
+  }
+  std::priority_queue<LinkedSU*, decltype(BotRoots), scheduleBefore>
+    Worklist(scheduleBefore(), std::move(BotRoots));
+  std::vector<simple_ilist<LinkedSU>> HGSchedule(HGNumMembers.size());
+  R.List.clear();
+  while (!Worklist.empty()) {
+    auto &LSU = *Worklist.top();
+    Worklist.pop();
+    auto HoldGroup = LSU.HoldGroup;
+    if (HoldGroup) {
+      auto &HGSch = HGSchedule[abs(HoldGroup)];
+      HGSch.push_back(LSU);
+      if (HoldGroup > 0) {
+        assert(HGNumMembers[HoldGroup] > 0);
+        if (0 == --HGNumMembers[HoldGroup]) {
+          // last member of the holding group was selected -
+          // append the whole group to the schedule
+          R.List.splice(R.List.end(), HGSch);
+          // clear the holding group to prevent predessors from
+          // getting into the group anymore
+          HoldGroup = 0;
+        }
+      }
+    } else
+      R.List.push_back(LSU);
+
+    // releasing predecessors
+    for (auto &Pred : LSU->Preds) {
+      const auto *PredSU = Pred.getSUnit();
+      if (Pred.isWeak() || PredSU->isBoundaryNode())
+        continue;
+
+      auto &PredLSU = getLSU(PredSU);
+      if (PredLSU.Parent != &R)
+        continue;
+
+      // mark pred as belonging to the same group
+      if (!PredLSU.HoldGroup)
+        PredLSU.HoldGroup = -abs(HoldGroup);
+
+      assert(NumSuccs[PredLSU.getNodeNum()]);
+      if (0 == --NumSuccs[PredLSU.getNodeNum()])
+        Worklist.push(&PredLSU);
+    }
   }
 }
 
@@ -923,7 +1007,7 @@ bool GCNMinRegScheduler2::isExpanded(const Subgraph &R) {
     // { 0, 1, 2, 4, 6 };
     //{ 0, 1, 44, 45 };
      { 0, 1, 2 };
-   //{ 0 };
+   // { 0, 1 };
 
   return Expand.count(R.ID) > 0 || (R.List.size() <= 2);
 }
