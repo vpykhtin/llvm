@@ -288,6 +288,7 @@ namespace {
 class GCNMinRegScheduler2 {
 
   struct Subgraph;
+  class SGScheduler;
 
   struct LinkedSU : ilist_node<LinkedSU> {
     const SUnit * const SU;
@@ -453,7 +454,6 @@ private:
   void discoverSubgraph(Subgraph &R);
   void scheduleSGWide(Subgraph &R);
 
-  struct scheduleBefore;
   void scheduleSG(Subgraph &R);
 
   void merge();
@@ -746,9 +746,9 @@ std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
 
   for (auto &R : Subgraphs) {
     discoverSubgraph(R);
-    scheduleSGWide(R);
+    scheduleSG(R);
     R.updateOrderIndexes();
-    //DEBUG(R.dump(dbgs()));
+    DEBUG(R.dump(dbgs()));
   }
 
   DEBUG(writeGraph("subdags_original.dot"));
@@ -873,76 +873,118 @@ void GCNMinRegScheduler2::scheduleSGWide(Subgraph &R) {
   }
 }
 
-struct GCNMinRegScheduler2::scheduleBefore {
-  bool operator()(const LinkedSU *LSU1, const LinkedSU *LSU2) {
-    if (LSU1->HoldGroup != LSU2->HoldGroup)
-      return LSU1->HoldGroup > LSU2->HoldGroup;
-    return false;
-  }
-};
 
-void GCNMinRegScheduler2::scheduleSG(Subgraph &R) {
-  std::vector<unsigned> NumSuccs(LSUStorage.size());
-  std::vector<LinkedSU*> BotRoots;
-  std::vector<unsigned> HGNumMembers;
-  BotRoots.reserve(16);
-  HGNumMembers.reserve(16);
-  for (auto &LSU : R.List) {
-    if (LSU.HoldGroup) {
-      assert(LSU.HoldGroup > 0);
-      HGNumMembers.resize(
-        std::max((unsigned)LSU.HoldGroup + 1, HGNumMembers.size()));
-      ++HGNumMembers[LSU.HoldGroup];
+class GCNMinRegScheduler2::SGScheduler {
+public:
+  SGScheduler(Subgraph &SG_, GCNMinRegScheduler2 &LSUSource_)
+    : SG(SG_)
+    , LSUSource(LSUSource_)
+    , SethiUllmanNumbers(calcSethiUllman())
+    , NumSuccs(LSUSource_.LSUStorage.size())
+    , Worklist(scheduleBefore(*this), init()) {
+  }
+
+  void schedule() {
+#ifndef NDEBUG
+    auto PrevLen = SG.List.size();
+#endif
+    SG.List.clear();
+    while (!Worklist.empty()) {
+      auto &LSU = *Worklist.top();
+      Worklist.pop();
+      SG.List.push_back(LSU);
+      releasePreds(LSU);
     }
-    if (auto NumSucc = getSubgraphSuccNum(LSU))
-      NumSuccs[LSU.getNodeNum()] = NumSucc;
-    else
-      BotRoots.push_back(&LSU);
+    assert(PrevLen == SG.List.size());
   }
-  std::priority_queue<LinkedSU*, decltype(BotRoots), scheduleBefore>
-    Worklist(scheduleBefore(), std::move(BotRoots));
-  std::vector<simple_ilist<LinkedSU>> HGSchedule(HGNumMembers.size());
-  R.List.clear();
-  while (!Worklist.empty()) {
-    auto &LSU = *Worklist.top();
-    Worklist.pop();
-    auto HoldGroup = LSU.HoldGroup;
-    if (HoldGroup) {
-      auto &HGSch = HGSchedule[abs(HoldGroup)];
-      HGSch.push_back(LSU);
-      if (HoldGroup > 0) {
-        assert(HGNumMembers[HoldGroup] > 0);
-        if (0 == --HGNumMembers[HoldGroup]) {
-          // last member of the holding group was selected -
-          // append the whole group to the schedule
-          R.List.splice(R.List.end(), HGSch);
-          // clear the holding group to prevent predessors from
-          // getting into the group anymore
-          HoldGroup = 0;
-        }
-      }
-    } else
-      R.List.push_back(LSU);
 
-    // releasing predecessors
+private:
+  Subgraph &SG;
+  GCNMinRegScheduler2 &LSUSource;
+  std::vector<unsigned> NumSuccs;
+  std::vector<unsigned> SethiUllmanNumbers;
+
+  struct scheduleBefore {
+    const SGScheduler &SGS;
+    scheduleBefore(const SGScheduler &SGS_) : SGS(SGS_) {}
+    bool operator()(const LinkedSU *LSU1, const LinkedSU *LSU2) {
+      return SGS.SethiUllmanNumbers[LSU1->getNodeNum()] >
+             SGS.SethiUllmanNumbers[LSU2->getNodeNum()];
+    }
+  };
+  std::priority_queue<LinkedSU*, std::vector<LinkedSU*>, scheduleBefore> Worklist;
+
+  std::vector<LinkedSU*> init() {
+    std::vector<LinkedSU*> BotRoots;
+    for (auto &LSU : SG.List) {
+      if (auto NumSucc = LSUSource.getSubgraphSuccNum(LSU))
+        NumSuccs[LSU.getNodeNum()] = NumSucc;
+      else
+        BotRoots.push_back(&LSU);
+    }
+    return BotRoots;
+  }
+
+  void releasePreds(LinkedSU &LSU) {
     for (auto &Pred : LSU->Preds) {
       const auto *PredSU = Pred.getSUnit();
       if (Pred.isWeak() || PredSU->isBoundaryNode())
         continue;
 
-      auto &PredLSU = getLSU(PredSU);
-      if (PredLSU.Parent != &R)
+      auto &PredLSU = LSUSource.getLSU(PredSU);
+      if (PredLSU.Parent != &SG)
         continue;
-
-      // mark pred as belonging to the same group
-      if (!PredLSU.HoldGroup)
-        PredLSU.HoldGroup = -abs(HoldGroup);
 
       assert(NumSuccs[PredLSU.getNodeNum()]);
       if (0 == --NumSuccs[PredLSU.getNodeNum()])
         Worklist.push(&PredLSU);
     }
   }
+
+  std::vector<unsigned> calcSethiUllman() const {
+    std::vector<unsigned> Res(LSUSource.LSUStorage.size());
+    // start from the end of the list to reduce the depth of recursion in
+    // calcSethiUllmanNumber
+    for (auto &LSU : make_range(SG.List.rbegin(), SG.List.rend()))
+      calcSethiUllmanNumber(LSU, Res);
+    return Res;
+  }
+
+  /// CalcNodeSethiUllmanNumber - Compute Sethi Ullman number.
+  /// Smaller number is the higher priority.
+  unsigned calcSethiUllmanNumber(LinkedSU &LSU,
+    std::vector<unsigned> &SethiUllmanNumbers) const {
+    unsigned &SethiUllmanNumber = SethiUllmanNumbers[LSU->NodeNum];
+    if (SethiUllmanNumber != 0)
+      return SethiUllmanNumber;
+
+    unsigned Extra = 0;
+    for (const SDep &Pred : LSU->Preds) {
+      if (Pred.isCtrl() || Pred.getSUnit()->isBoundaryNode())
+        continue;
+      auto &PredLSU = LSUSource.getLSU(Pred.getSUnit());
+      if (PredLSU.Parent != LSU.Parent)
+        continue;
+      auto PredSethiUllman = calcSethiUllmanNumber(PredLSU, SethiUllmanNumbers);
+      if (PredSethiUllman > SethiUllmanNumber) {
+        SethiUllmanNumber = PredSethiUllman;
+        Extra = 0;
+      }
+      else if (PredSethiUllman == SethiUllmanNumber)
+        ++Extra;
+    }
+
+    SethiUllmanNumber += Extra;
+
+    if (SethiUllmanNumber == 0)
+      SethiUllmanNumber = 1;
+
+    return SethiUllmanNumber;
+  }
+};
+
+void GCNMinRegScheduler2::scheduleSG(Subgraph &R) {
+  SGScheduler(R, *this).schedule();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
