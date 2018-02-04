@@ -250,6 +250,21 @@ collectVirtualRegUses(const MachineInstr &MI, const LiveIntervals &LIS,
 ///////////////////////////////////////////////////////////////////////////////
 // GCNRPTracker
 
+GCNRPTracker::LiveRegSet llvm::operator-(const GCNRPTracker::LiveRegSet &LR1,
+                                         const GCNRPTracker::LiveRegSet &LR2) {
+  GCNRPTracker::LiveRegSet Res;
+  for (auto RegMask : LR1) {
+    auto I = LR2.find(RegMask.first);
+    if (I != LR2.end()) {
+      RegMask.second &= ~I->second;
+      if (!RegMask.second.any())
+        continue;
+    }
+    Res.insert(RegMask);
+  }
+  return Res;
+}
+
 GCNRPTracker::LiveRegSet llvm::getLiveThroughRegs(const MachineInstr &FirstMI,
                                                   const MachineInstr &LastMI,
                                                   const LiveIntervals &LIS,
@@ -327,33 +342,15 @@ void GCNRPTracker::reset(const MachineInstr &MI,
   MaxPressure = CurPressure = getRegPressure(*MRI, LiveRegs);
 }
 
-void GCNUpwardRPTracker::reset(const MachineInstr &MI,
-                               const LiveRegSet *LiveRegsCopy) {
-  GCNRPTracker::reset(MI, LiveRegsCopy, true);
-}
-
-void GCNUpwardRPTracker::recede(const MachineInstr &MI) {
+void GCNUpwardRPTracker::recedeDefsOnly(const MachineInstr &MI) {
   assert(MRI && "call reset first");
-
-  LastTrackedMI = &MI;
 
   if (MI.isDebugInstr())
     return;
 
-  auto const RegUses = collectVirtualRegUses(MI, LIS, *MRI);
-
-  // calc pressure at the MI (defs + uses)
-  auto AtMIPressure = CurPressure;
-  for (const auto &U : RegUses) {
-    auto LiveMask = LiveRegs[U.RegUnit];
-    AtMIPressure.inc(U.RegUnit, LiveMask, LiveMask | U.LaneMask, *MRI);
-  }
-  // update max pressure
-  MaxPressure = max(AtMIPressure, MaxPressure);
-
   for (const auto &MO : MI.defs()) {
     if (!MO.isReg() || !TargetRegisterInfo::isVirtualRegister(MO.getReg()) ||
-         MO.isDead())
+      MO.isDead())
       continue;
 
     auto Reg = MO.getReg();
@@ -367,6 +364,34 @@ void GCNUpwardRPTracker::recede(const MachineInstr &MI) {
     if (LiveMask.none())
       LiveRegs.erase(I);
   }
+}
+
+void GCNUpwardRPTracker::reset(const MachineInstr &MI,
+                               const LiveRegSet *LiveRegsCopy) {
+  GCNRPTracker::reset(MI, LiveRegsCopy, true);
+}
+
+void GCNUpwardRPTracker::recede(const MachineInstr &MI) {
+  assert(MRI && "call reset first");
+
+  LastTrackedMI = &MI;
+
+  if (MI.isDebugValue())
+    return;
+
+  auto const RegUses = collectVirtualRegUses(MI, LIS, *MRI);
+
+  // calc pressure at the MI (defs + uses)
+  auto AtMIPressure = CurPressure;
+  for (const auto &U : RegUses) {
+    auto LiveMask = LiveRegs[U.RegUnit];
+    AtMIPressure.inc(U.RegUnit, LiveMask, LiveMask | U.LaneMask, *MRI);
+  }
+  // update max pressure
+  MaxPressure = max(AtMIPressure, MaxPressure);
+
+  recedeDefsOnly(MI);
+
   for (const auto &U : RegUses) {
     auto &LiveMask = LiveRegs[U.RegUnit];
     auto PrevMask = LiveMask;

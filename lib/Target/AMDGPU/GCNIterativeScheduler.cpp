@@ -81,6 +81,7 @@ std::vector<const SUnit *> makeMinRegSchedule(ArrayRef<const SUnit*> TopRoots,
                                               const ScheduleDAG &DAG);
 
 std::vector<const SUnit *> makeMinRegSchedule2(ArrayRef<const SUnit*> BotRoots,
+                                               const GCNRPTracker::LiveRegSet &LiveInRegs,
                                                const GCNRPTracker::LiveRegSet &LiveOutRegs,
                                                const ScheduleDAGMI &DAG);
 
@@ -747,6 +748,7 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
 
     DEBUG(dbgs() << "\n=== Begin scheduling " << R->getName(LIS) << '\n');
     const auto MinSchedule = makeMinRegSchedule2(DAG.getBottomRoots(),
+                                                 getRegionLiveThrough(*R),
                                                  getRegionLiveOuts(*R),
                                                  *this);
     DEBUG(dbgs() << "\n=== End scheduling " << R->getName(LIS) << '\n');

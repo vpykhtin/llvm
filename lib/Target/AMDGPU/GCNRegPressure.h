@@ -132,6 +132,9 @@ public:
                             const MachineRegisterInfo &MRI);
 };
 
+GCNRPTracker::LiveRegSet operator-(const GCNRPTracker::LiveRegSet &LR1,
+                                   const GCNRPTracker::LiveRegSet &LR2);
+
 class GCNUpwardRPTracker : public GCNRPTracker {
 public:
   GCNUpwardRPTracker(const LiveIntervals &LIS_) : GCNRPTracker(LIS_) {}
@@ -142,6 +145,8 @@ public:
 
   // move to the state just above the MI
   void recede(const MachineInstr &MI);
+
+  void recedeDefsOnly(const MachineInstr &MI);
 
   // checks whether the tracker's state after receding MI corresponds
   // to reported by LIS

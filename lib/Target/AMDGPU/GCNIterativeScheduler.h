@@ -114,8 +114,16 @@ protected:
   class BuildDAG;
   class OverrideLegacyStrategy;
 
+  GCNRPTracker::LiveRegSet getRegionLiveIns(const Region &R) const {
+    return getLiveRegsBefore(*R.Begin, *LIS);
+  }
+
   GCNRPTracker::LiveRegSet getRegionLiveOuts(const Region &R) const {
     return getLiveRegsAfter(*std::prev(R.End), *LIS);
+  }
+
+  GCNRPTracker::LiveRegSet getRegionLiveThrough(const Region &R) const {
+    return getLiveThroughRegs(*R.Begin, *std::prev(R.End), *LIS, MRI);
   }
 
   template <typename Range>
