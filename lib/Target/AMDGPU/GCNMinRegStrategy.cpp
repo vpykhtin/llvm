@@ -312,6 +312,11 @@ class GCNMinRegScheduler2 {
 
     bool dependsOn(const Subgraph &SG,
                    const GCNMinRegScheduler2 &LSUSource) const;
+
+    void print(raw_ostream &OS) const {
+      OS << "SU" << getNodeNum() << ": ";
+      SU->getInstr()->print(OS);
+    }
   };
 
   class Merge;
@@ -367,8 +372,6 @@ class GCNMinRegScheduler2 {
                     const MachineRegisterInfo &MRI);
 
     friend class GCNMinRegScheduler2::Merge;
-
-    decltype(List.end()) getMergeChunk(Subgraph* MergeTo, GCNMinRegScheduler2 &LSUSource);
 
     void mergeSchedule(const DenseSet<Subgraph*> &Mergees,
                        GCNMinRegScheduler2 &LSUSource);
@@ -711,11 +714,15 @@ public:
     NumReadyPreds = 0;
   }
 
-  std::set<LinkedSU*> getPredsSet() const {
-    std::set<LinkedSU*> Set;
+  LinkedSU* getLowestPred() const {
+    LinkedSU* PredLSU = nullptr;
+    auto Lowest = std::numeric_limits<unsigned>::max();
     for (const auto &P : NumSuccs)
-      Set.insert(P.first);
-    return Set;
+      if (P.first->SGOrderIndex < Lowest) {
+        Lowest = P.first->SGOrderIndex;
+        PredLSU = P.first;
+      };
+    return PredLSU;
   }
 };
 
@@ -723,15 +730,20 @@ public:
 
 void GCNMinRegScheduler2::Subgraph::mergeSchedule(const DenseSet<Subgraph*> &Mergees,
                                                   GCNMinRegScheduler2 &LSUSource) {
-  std::map<std::set<LinkedSU*>, // required predecessors for the chunks
+  updateOrderIndexes();
+  std::map<LinkedSU*, // lowest predessor required for the chunks
     std::vector<std::pair<Subgraph*,
       decltype(make_range(Subgraph::List.begin(), Subgraph::List.begin()))> >
   > Chunks;
+
   // 1. collecting merge chunks
   for (auto *M : Mergees) {
     SGRPTracker RPT(LSUSource, *M, this);
     RPT.reset();
     auto OutRP = RPT.getPressure();
+    //std::map<LinkedSU*, // lowest predessor required for the chunks
+    //  decltype(make_range(Subgraph::List.begin(), Subgraph::List.begin()))
+    //> MyChunks;
     do {
       RPT.clearReadyPreds();
 
@@ -744,62 +756,26 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(const DenseSet<Subgraph*> &Mer
 
       auto End = RPT.getCur().getIterator();
 
-      Chunks[RPT.getPredsSet()].emplace_back(M, make_range(Begin, std::prev(End)));
+      Chunks[RPT.getLowestPred()].emplace_back(M, make_range(Begin, std::prev(End)));
 
       DEBUG(dbgs() << "Chunk:\n";
-        for (const auto &LSU : make_range(Begin, End)) {
-          dbgs() << "SU" << LSU.getNodeNum() << ": ";
-          LSU->getInstr()->print(dbgs());
-        }
-        dbgs() << "Preds:";
-        for (const auto *LSU : RPT.getPredsSet())
-          dbgs() << " SU" << LSU->getNodeNum();
-        dbgs() << '\n';
+        for (const auto &LSU : make_range(Begin, End))
+          LSU.print(dbgs());
+        dbgs() << "Lowest pred: "; RPT.getLowestPred()->print(dbgs());
       );
     } while (!RPT.done());
   }
 
   // 2. insert chunks into appropriate location
-  std::list< std::pair<
-    std::set<LinkedSU*>, // required predecessors for the chunks
-    std::vector<std::pair<Subgraph*,
-      decltype(make_range(Subgraph::List.begin(), Subgraph::List.begin()))>>>> ChunksL;
-  for (auto &P : Chunks)
-    if (!P.first.empty())
-      ChunksL.push_back(std::make_pair(P.first, std::move(P.second)));
-
-
   DEBUG(dbgs() << "\nMerging in chunks\n");
-  for (auto I = List.rbegin(), E = List.rend(); I != E;) {
-    auto &LSU = *I++;
-    DEBUG(
-      dbgs() << "SU" << LSU.getNodeNum() << ": ";
-      LSU->getInstr()->print(dbgs());
-    );
-    for (auto C = ChunksL.begin(), CE = ChunksL.end(); C != CE;) {
-      auto X = C++;
-      if (X->first.erase(&LSU) == 0 || !X->first.empty())
-        continue;
-
-      for (auto &P : X->second) {
-        DEBUG(for (auto I = P.second.end(), E = std::prev(P.second.begin()); I != E; --I) {
-          const auto &LSU = *I;
-          dbgs() << "  SU" << LSU.getNodeNum() << ": ";
-          LSU->getInstr()->print(dbgs());
-        });
-        List.splice(LSU.getIterator(), P.first->List, P.second.begin(), std::next(P.second.end()));
-      }
-      ChunksL.erase(X);
-    }
-  }
-
-  // merging leftovers
-  for (auto &P : Chunks[std::set<LinkedSU*>()]) {
-    List.splice(List.end(), P.first->List, P.second.begin(), P.second.end());
+  for (const auto &C : Chunks) {
+    auto InsPoint = C.first ? C.first->getIterator() : List.end();
+    for(const auto &R : C.second)
+      List.splice(InsPoint, R.first->List,
+                  R.second.begin(), std::next(R.second.end()));
   }
 
 #ifndef NDEBUG
-  assert(ChunksL.empty());
   for (auto *M : Mergees)
     assert(M->List.empty() || (M->dump(dbgs()),false));
 #endif
