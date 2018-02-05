@@ -290,6 +290,7 @@ class GCNMinRegScheduler2 {
   struct Subgraph;
   class SGScheduler;
   class SGRPTracker;
+  struct LSUExecOrder;
 
   struct LinkedSU : ilist_node<LinkedSU> {
     const SUnit * const SU;
@@ -357,6 +358,11 @@ class GCNMinRegScheduler2 {
 
     typedef std::map<std::set<GCNMinRegScheduler2::Subgraph*>, unsigned> KillInfo;
     const KillInfo &getKills(const GCNMinRegScheduler2 &LSUSource) const;
+
+    using LSURange = decltype(make_range(List.begin(),List.end()));
+
+    std::map<LinkedSU*, LSURange, LSUExecOrder>
+      getMergeChunks(Subgraph *MergeTo, GCNMinRegScheduler2 &LSUSource);
 
     void updateOrderIndexes() {
       unsigned I = 0;
@@ -728,45 +734,74 @@ public:
 
 #if 1
 
+struct GCNMinRegScheduler2::LSUExecOrder {
+  bool operator()(const LinkedSU *LSU1, const LinkedSU *LSU2) {
+    // SGOrderIndex indexes are numbered from the bottom of a schedule
+    // so execution order is a reverse
+    return LSU1->SGOrderIndex > LSU2->SGOrderIndex;
+  }
+};
+
+std::map<GCNMinRegScheduler2::LinkedSU*,
+         GCNMinRegScheduler2::Subgraph::LSURange,
+         GCNMinRegScheduler2::LSUExecOrder>
+GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
+                                              GCNMinRegScheduler2 &LSUSource) {
+  std::map<LinkedSU*, LSURange, LSUExecOrder> Chunks;
+
+  SGRPTracker RPT(LSUSource, *this, MergeTo);
+  RPT.reset();
+  auto OutRP = RPT.getPressure();
+  do {
+    RPT.clearReadyPreds();
+
+    auto Begin = RPT.getCur().getIterator();
+    while (!RPT.done() &&
+      (!RPT.hasReadyPreds() ||
+        RPT.getPendingPredsStrippedPressure() != OutRP))
+      RPT.recede();
+    auto End = RPT.getCur().getIterator();
+
+    DEBUG(dbgs() << "Chunk:\n";
+      for (const auto &LSU : make_range(Begin, End))
+        LSU.print(dbgs());
+      dbgs() << "Lowest pred: "; RPT.getLowestPred()->print(dbgs());
+    );
+
+    // Normally every found chunk should depend on the earlier LSU (by exec
+    // order) in the MergeTo schedule which means it should be placed in the
+    // beginning of the Chunks map as it's sorted in execution order.
+    // But there're can be a "twist" when we find a chunk that depend on the
+    // LSU in MergeTo which actually should be executed later. In this case
+    // we should join every previously found chunks to be dependent on the
+    // later one. This makes the schedule worse but valid.
+    auto R = make_range(Begin, std::prev(End));
+    auto InsRes = Chunks.emplace(RPT.getLowestPred(), R);
+    auto I = InsRes.first;
+    auto Inserted = InsRes.second;
+    if (I != Chunks.begin()) {
+      auto Start = Inserted ? std::prev(I) : I;
+      I->second = make_range(Start->second.begin(), R.end());
+      Chunks.erase(Chunks.begin(), I);
+    } else if (!Inserted)
+      I->second = make_range(I->second.begin(), R.end());
+  } while (!RPT.done());
+  return Chunks;
+}
+
 void GCNMinRegScheduler2::Subgraph::mergeSchedule(const DenseSet<Subgraph*> &Mergees,
                                                   GCNMinRegScheduler2 &LSUSource) {
   updateOrderIndexes();
-  std::map<LinkedSU*, // lowest predessor required for the chunks
-    std::vector<std::pair<Subgraph*,
-      decltype(make_range(Subgraph::List.begin(), Subgraph::List.begin()))> >
-  > Chunks;
 
-  // 1. collecting merge chunks
-  for (auto *M : Mergees) {
-    SGRPTracker RPT(LSUSource, *M, this);
-    RPT.reset();
-    auto OutRP = RPT.getPressure();
-    //std::map<LinkedSU*, // lowest predessor required for the chunks
-    //  decltype(make_range(Subgraph::List.begin(), Subgraph::List.begin()))
-    //> MyChunks;
-    do {
-      RPT.clearReadyPreds();
+  DenseMap<LinkedSU*, // lowest predessor required for the chunks
+           std::vector<std::pair<Subgraph*, LSURange> > > Chunks;
 
-      auto Begin = RPT.getCur().getIterator();
+  // collecting merge chunks
+  for (auto *M : Mergees)
+    for(auto &P : M->getMergeChunks(this, LSUSource))
+      Chunks[P.first].emplace_back(M, std::move(P.second));
 
-      while (!RPT.done() &&
-            (!RPT.hasReadyPreds() ||
-              RPT.getPendingPredsStrippedPressure() != OutRP))
-        RPT.recede();
-
-      auto End = RPT.getCur().getIterator();
-
-      Chunks[RPT.getLowestPred()].emplace_back(M, make_range(Begin, std::prev(End)));
-
-      DEBUG(dbgs() << "Chunk:\n";
-        for (const auto &LSU : make_range(Begin, End))
-          LSU.print(dbgs());
-        dbgs() << "Lowest pred: "; RPT.getLowestPred()->print(dbgs());
-      );
-    } while (!RPT.done());
-  }
-
-  // 2. insert chunks into appropriate location
+  // insert chunks into appropriate location
   DEBUG(dbgs() << "\nMerging in chunks\n");
   for (const auto &C : Chunks) {
     auto InsPoint = C.first ? C.first->getIterator() : List.end();
@@ -779,7 +814,7 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(const DenseSet<Subgraph*> &Mer
   for (auto *M : Mergees)
     assert(M->List.empty() || (M->dump(dbgs()),false));
 #endif
-  DEBUG(dump(dbgs()));
+  //DEBUG(dump(dbgs()));
 }
 
 #endif
