@@ -738,7 +738,9 @@ struct GCNMinRegScheduler2::LSUExecOrder {
   bool operator()(const LinkedSU *LSU1, const LinkedSU *LSU2) {
     // SGOrderIndex indexes are numbered from the bottom of a schedule
     // so execution order is a reverse
-    return LSU1->SGOrderIndex > LSU2->SGOrderIndex;
+    return (LSU1 != nullptr && LSU2 != nullptr) ?
+      (LSU1->SGOrderIndex > LSU2->SGOrderIndex) :
+      (LSU1 < LSU2); // put nullptr to the top
   }
 };
 
