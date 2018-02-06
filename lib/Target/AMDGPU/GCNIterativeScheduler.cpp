@@ -81,7 +81,7 @@ std::vector<const SUnit *> makeMinRegSchedule(ArrayRef<const SUnit*> TopRoots,
                                               const ScheduleDAG &DAG);
 
 std::vector<const SUnit *> makeMinRegSchedule2(ArrayRef<const SUnit*> BotRoots,
-                                               const GCNRPTracker::LiveRegSet &LiveInRegs,
+                                               const GCNRPTracker::LiveRegSet &LiveThrRegs,
                                                const GCNRPTracker::LiveRegSet &LiveOutRegs,
                                                const ScheduleDAGMI &DAG);
 
