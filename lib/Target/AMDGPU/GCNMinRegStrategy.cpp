@@ -352,8 +352,11 @@ class GCNMinRegScheduler2 {
       return Regs.size();
     }
 
+    std::set<Subgraph*> getDirectSuccs() const;
+
     typedef std::map<std::set<GCNMinRegScheduler2::Subgraph*>, unsigned> KillInfo;
     const KillInfo &getKills(const GCNMinRegScheduler2 &LSUSource) const;
+    KillInfo getMergeGroups(const GCNMinRegScheduler2 &LSUSource);
 
     using LSURange = decltype(make_range(List.begin(),List.end()));
 
@@ -737,31 +740,6 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(const DenseSet<Subgraph*> &Mer
 #endif
 
 
-const GCNMinRegScheduler2::Subgraph::KillInfo
-&GCNMinRegScheduler2::Subgraph::getKills(const GCNMinRegScheduler2 &LSUSource) const {
-  if (!Kills.empty())
-    return Kills;
-
-  for (auto &LSU : List) {
-    const auto &Succs = LSU.SU->Succs;
-    if (Succs.size() <= 1)
-      continue;
-
-    std::set<Subgraph*> Killers;
-    for (const auto &Succ : Succs) {
-      if (!Succ.isAssignedRegDep())
-        continue;
-      auto *SuccR = LSUSource.getLSU(Succ.getSUnit()).Parent;
-      if (SuccR != this)
-        Killers.insert(SuccR);
-    }
-
-    if (!Killers.empty())
-      Kills[Killers]++;
-  }
-  return Kills;
-}
-
 // returns the number of SU successors belonging to R
 unsigned GCNMinRegScheduler2::getSubgraphSuccNum(const LinkedSU &LSU) const {
   unsigned NumSucc = 0;
@@ -830,17 +808,6 @@ void GCNMinRegScheduler2::setUnitDepthDirty(const SUnit &SU) const {
   } while (!WorkList.empty());
 }
 
-unsigned GCNMinRegScheduler2::getExternalConsumersNum(const LinkedSU &LSU) const {
-  DenseSet<const Subgraph*> Cons;
-  for (auto &Succ : LSU.SU->Succs) {
-    if (!Succ.isWeak() && Succ.isAssignedRegDep()) {
-      auto *SuccR = getLSU(Succ.getSUnit()).Parent;
-      if (SuccR != LSU.Parent)
-        Cons.insert(SuccR);
-    }
-  }
-  return Cons.size();
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -876,7 +843,7 @@ std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
     //DEBUG(R.dump(dbgs()));
   }
 
-  //DEBUG(writeGraph("subdags_original.dot"));
+  DEBUG(writeGraph("subdags_original.dot"));
 
   merge();
 
@@ -912,11 +879,8 @@ void GCNMinRegScheduler2::discoverSubgraph(Subgraph &R) {
 ///////////////////////////////////////////////////////////////////////////////
 // Merging
 
+#if 0
 void GCNMinRegScheduler2::merge() {
-
-  //Subgraphs.sort([=](const Subgraph &R1, const Subgraph &R2) ->bool {
-  //  return true;
-  //});
 
 #if 1
   bool Changed;
@@ -960,6 +924,166 @@ void GCNMinRegScheduler2::merge() {
   SG0.dump(dbgs());
 #endif
 #endif
+}
+#endif
+
+const GCNMinRegScheduler2::Subgraph::KillInfo
+&GCNMinRegScheduler2::Subgraph::getKills(const GCNMinRegScheduler2 &LSUSource) const {
+  if (!Kills.empty())
+    return Kills;
+
+  for (auto &LSU : List) {
+    const auto &Succs = LSU.SU->Succs;
+    if (Succs.size() <= 1)
+      continue;
+
+    std::set<Subgraph*> Killers;
+    for (const auto &Succ : Succs) {
+      if (!Succ.isAssignedRegDep())
+        continue;
+      auto *SuccR = LSUSource.getLSU(Succ.getSUnit()).Parent;
+      if (SuccR != this)
+        Killers.insert(SuccR);
+    }
+
+    if (!Killers.empty())
+      Kills[Killers]++;
+  }
+  return Kills;
+}
+
+// return the set of successors that aren't dependent on each other that is can be scheduled
+// right after this subgraph in arbitrary order
+std::set<GCNMinRegScheduler2::Subgraph*> GCNMinRegScheduler2::Subgraph::getDirectSuccs() const {
+  std::set<GCNMinRegScheduler2::Subgraph*> DirectSuccs;
+  for (const auto &Succ : Succs) {
+    bool hasDep = false;
+    for (const auto &SuccPred : Succ.first->Preds) {
+      if (Succs.count(SuccPred.first)) {
+        hasDep = true;
+        break;
+      }
+    }
+    if (!hasDep)
+      DirectSuccs.insert(Succ.first);
+  }
+  return DirectSuccs;
+}
+
+// return true if S2 is a subset of S1
+template <typename Set1, typename Set2>
+bool contains(const Set1 &S1, const Set2 &S2) {
+  if (S2.size() > S1.size())
+    return false;
+  for (const auto &Key : S2) {
+    if (S1.count(Key) == 0)
+      return false;
+  }
+  return true;
+}
+#if 1
+GCNMinRegScheduler2::Subgraph::KillInfo
+GCNMinRegScheduler2::Subgraph::getMergeGroups(const GCNMinRegScheduler2 &LSUSource) {
+  KillInfo Res;
+  const auto Succs = getDirectSuccs();
+  for (const auto &K : getKills(LSUSource)) {
+    if (contains(Succs, K.first)) {
+      auto S = K.first;
+      S.insert(this);
+      Res.emplace(S, K.second);
+    }
+  }
+  return Res;
+}
+#else
+
+GCNMinRegScheduler2::Subgraph::KillInfo
+GCNMinRegScheduler2::Subgraph::getMergeGroups(const GCNMinRegScheduler2 &LSUSource) {
+  KillInfo MergeGroups;
+
+  const auto DirectSuccs = getDirectSuccs();
+
+  for (auto &LSU : List) {
+    const auto &LSUSuccs = LSU.SU->Succs;
+    if (LSUSuccs.size() <= 1)
+      continue;
+
+    std::set<Subgraph*> DirectUsers;
+    for (const auto &Succ : LSUSuccs) {
+      if (!Succ.isAssignedRegDep())
+        continue;
+      auto *SuccSG = LSUSource.getLSU(Succ.getSUnit()).Parent;
+      if (SuccSG == this)
+        continue;
+      if (!DirectSuccs.count(SuccSG)) {
+        DirectUsers.clear();
+        break;
+      } else
+        DirectUsers.insert(SuccSG);
+    }
+
+    if (!DirectUsers.empty()) {
+      DirectUsers.insert(this);
+      auto InsRes = MergeGroups.emplace(std::move(DirectUsers), 1);
+      if (!InsRes.second)
+        ++InsRes.first->second;
+    }
+  }
+  return MergeGroups;
+}
+#endif
+
+void GCNMinRegScheduler2::merge() {
+  Subgraph::KillInfo Merges;
+  // collect merge groups
+  for (auto &SG : Subgraphs) {
+    if (SG.Succs.empty()) continue;
+    const auto MG = SG.getMergeGroups(*this);
+    Merges.insert(MG.begin(), MG.end());
+  }
+
+  // build ambiguity map - subgraph is considered ambiguous if it's
+  // being contained in more than one merge group
+  std::list<
+    std::pair<Subgraph*,
+              std::vector<decltype(Merges)::value_type*>>> AmbiguityMap;
+  for (auto &SG : Subgraphs) {
+    AmbiguityMap.emplace_back(&SG, std::vector<decltype(Merges)::value_type*>());
+    auto &L = AmbiguityMap.back().second;
+    for (auto &P : Merges)
+      if (P.first.count(&SG))
+        L.push_back(&P);
+    if (L.size() <= 1)
+      AmbiguityMap.pop_back(); // discarding non-ambigous subgraph
+  }
+
+  // put most ambiguous subgraph first
+  AmbiguityMap.sort([=](const decltype(AmbiguityMap)::value_type &V1,
+                        const decltype(AmbiguityMap)::value_type &V2) -> bool {
+    return V1.second.size() > V2.second.size();
+  });
+
+  // disambiguate subgraphs
+  for (auto &A : AmbiguityMap) {
+    auto &L = A.second;
+    assert(L.size() > 1);
+    auto MaxKillsMG = *std::max_element(L.begin(), L.end(),
+      [=](decltype(A.second)::value_type V1,
+          decltype(A.second)::value_type V2)->bool {
+      return V1->second < V2->second;
+    });
+    if (MaxKillsMG->second == 0)
+      continue;
+    for (auto *MG : L)
+      if (MG != MaxKillsMG)
+        MG->second = 0;
+  }
+
+  // do the merge
+  //for (auto &MG : Merges) {
+  //  if (MG.second)
+  //    Merge(MG, *this);
+  //}
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1162,7 +1286,8 @@ bool GCNMinRegScheduler2::isExpanded(const Subgraph &R) {
    //  { 0, 1, 2 };
    // { 0, 1 };
 
-    { 0, 1 };
+  //  { 0, 1 };
+  {};
 
   //{ 62, 63 };
 
@@ -1232,6 +1357,18 @@ bool GCNMinRegScheduler2::isEdgeHidden(const SUnit &SU, const SDep &Pred) const 
 static void writeSUtoPredSULink(raw_ostream &O, const SUnit &SU, const SDep &Pred) {
   O << "\tSU" << SU.NodeNum << " -> SU" << Pred.getSUnit()->NodeNum
     << '[' << getDepColor(Pred.getKind()) << "];\n";
+}
+
+unsigned GCNMinRegScheduler2::getExternalConsumersNum(const LinkedSU &LSU) const {
+  DenseSet<const Subgraph*> Cons;
+  for (auto &Succ : LSU.SU->Succs) {
+    if (!Succ.isWeak() && Succ.isAssignedRegDep()) {
+      auto *SuccR = getLSU(Succ.getSUnit()).Parent;
+      if (SuccR != LSU.Parent)
+        Cons.insert(SuccR);
+    }
+  }
+  return Cons.size();
 }
 
 void GCNMinRegScheduler2::writeLSU(raw_ostream &O, const LinkedSU &LSU) const {
