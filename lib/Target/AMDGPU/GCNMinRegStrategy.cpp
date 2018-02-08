@@ -360,7 +360,8 @@ class GCNMinRegScheduler2 {
       }
     };
 
-    typedef std::map<std::set<Subgraph*, SGIDOrder>, unsigned> MergeInfo;
+    typedef std::set<Subgraph*, SGIDOrder> MergeSet;
+    typedef std::map<MergeSet, unsigned> MergeInfo;
 
     void insertMergeGroups(MergeInfo &MergeGroups,
                            const GCNMinRegScheduler2 &LSUSource);
@@ -385,7 +386,8 @@ class GCNMinRegScheduler2 {
 
     friend class GCNMinRegScheduler2::Merge;
 
-    void mergeSchedule(const DenseSet<Subgraph*> &Mergees,
+    template <typename I>
+    void mergeSchedule(I Begin, I End,
                        GCNMinRegScheduler2 &LSUSource);
 
     template <typename Range>
@@ -398,19 +400,14 @@ class GCNMinRegScheduler2 {
 
   class Merge {
     Subgraph &SG;
-    DenseSet<Subgraph*> Mergees;
     GCNMinRegScheduler2 &LSUSource;
     bool Cancelled = false;
   public:
-    template <typename Range>
-    Merge(Subgraph &SG_,
-          Range &&Mergees_,
+    Merge(Subgraph::MergeSet &Merges,
           GCNMinRegScheduler2 &LSUSource_)
-      : SG(SG_)
+      : SG(**Merges.begin())
       , LSUSource(LSUSource_) {
-      for (auto *M : Mergees_)
-        Mergees.insert(M);
-      SG.mergeSchedule(Mergees, LSUSource);
+      SG.mergeSchedule(std::next(Merges.begin()), Merges.end(), LSUSource);
     }
     ~Merge() {
       if (!Cancelled)
@@ -469,6 +466,7 @@ private:
 
   void scheduleSG(Subgraph &R);
 
+  Subgraph::MergeInfo getMerges();
   void merge();
   std::vector<const SUnit*> finalSchedule();
 
@@ -712,7 +710,8 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
   return Chunks;
 }
 
-void GCNMinRegScheduler2::Subgraph::mergeSchedule(const DenseSet<Subgraph*> &Mergees,
+template <typename I>
+void GCNMinRegScheduler2::Subgraph::mergeSchedule(I Begin, I End,
                                                   GCNMinRegScheduler2 &LSUSource) {
   updateOrderIndexes();
 
@@ -720,7 +719,7 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(const DenseSet<Subgraph*> &Mer
            std::vector<std::pair<Subgraph*, LSURange> > > Chunks;
 
   // collecting merge chunks
-  for (auto *M : Mergees)
+  for (auto *M : make_range(Begin, End))
     for(auto &P : M->getMergeChunks(this, LSUSource))
       Chunks[P.first].emplace_back(M, std::move(P.second));
 
@@ -904,7 +903,7 @@ void GCNMinRegScheduler2::Subgraph::insertMergeGroups(MergeInfo &MergeGroups,
                                         const GCNMinRegScheduler2 &LSUSource) {
   if (Succs.empty()) return;
   const auto DirectSuccs = getDirectSuccs();
-  std::set<Subgraph*, SGIDOrder> DirectUsers;
+  MergeSet DirectUsers;
   for (auto &LSU : List) {
     const auto &LSUSuccs = LSU.SU->Succs;
     if (LSUSuccs.size() <= 1)
@@ -933,7 +932,7 @@ void GCNMinRegScheduler2::Subgraph::insertMergeGroups(MergeInfo &MergeGroups,
   }
 }
 
-void GCNMinRegScheduler2::merge() {
+GCNMinRegScheduler2::Subgraph::MergeInfo GCNMinRegScheduler2::getMerges() {
   Subgraph::MergeInfo Merges;
   // collect merge groups
   for (auto &SG : Subgraphs)
@@ -975,12 +974,19 @@ void GCNMinRegScheduler2::merge() {
       if (MG != MaxKillsMG)
         MG->second = 0;
   }
+  return Merges;
+}
 
-  // do the merge
-  //for (auto &MG : Merges) {
-  //  if (MG.second)
-  //    Merge(MG, *this);
-  //}
+void GCNMinRegScheduler2::merge() {
+  while(true) {
+    auto Merges = getMerges();
+    if (Merges.empty())
+      break;
+    // do the merge
+    for (auto &MG : Merges)
+      if (MG.second)
+        Merge(MG.first, *this);
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
