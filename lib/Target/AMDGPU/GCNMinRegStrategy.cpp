@@ -354,9 +354,16 @@ class GCNMinRegScheduler2 {
 
     std::set<Subgraph*> getDirectSuccs() const;
 
-    typedef std::map<std::set<GCNMinRegScheduler2::Subgraph*>, unsigned> KillInfo;
-    const KillInfo &getKills(const GCNMinRegScheduler2 &LSUSource) const;
-    KillInfo getMergeGroups(const GCNMinRegScheduler2 &LSUSource);
+    struct SGIDOrder {
+      bool operator()(const Subgraph *SG1, const Subgraph *SG2) const {
+        return SG1->ID < SG2->ID;
+      }
+    };
+
+    typedef std::map<std::set<Subgraph*, SGIDOrder>, unsigned> MergeInfo;
+
+    void insertMergeGroups(MergeInfo &MergeGroups,
+                           const GCNMinRegScheduler2 &LSUSource);
 
     using LSURange = decltype(make_range(List.begin(),List.end()));
 
@@ -387,9 +394,6 @@ class GCNMinRegScheduler2 {
     void patchDepsAfterMerge(Subgraph *Mergee);
 
     void rollbackMerge();
-
-  private:
-    mutable KillInfo Kills;
   };
 
   class Merge {
@@ -526,7 +530,6 @@ void GCNMinRegScheduler2::Subgraph::patchDepsAfterMerge(Subgraph *Mergee) {
   for (auto &MrgPred : Mergee->Preds) {
     auto *MrgPredSG = MrgPred.first;
     MrgPredSG->Succs.erase(Mergee);
-    MrgPredSG->Kills.clear();
     if (MrgPredSG == this)
       continue;
     for (auto Reg : MrgPred.second) {
@@ -879,79 +882,6 @@ void GCNMinRegScheduler2::discoverSubgraph(Subgraph &R) {
 ///////////////////////////////////////////////////////////////////////////////
 // Merging
 
-#if 0
-void GCNMinRegScheduler2::merge() {
-
-#if 1
-  bool Changed;
-  do {
-    Changed = false;
-    for (auto &SG : Subgraphs) {
-
-      for (const auto &K : SG.getKills(*this)) {
-        unsigned InstrNum = 0;
-        for (auto *SuccSG : K.first)
-          InstrNum += SuccSG->List.size();
-        assert(InstrNum > 0);
-        if (InstrNum <= K.second * 2) {
-          DEBUG(dbgs() << "Merging " << SG.ID << "\n");
-          Merge(SG, K.first, *this);
-          Changed = true;
-          break;
-        }
-      }
-
-    }
-  } while (Changed);
-#endif
-
-#if 1
-  Subgraph *SG1[] = { &SGStorage[1] };
-  Merge(SGStorage[0], SG1, *this);
-#endif
-
-#if 1
-#if 0
-  Subgraph *SG2[] = { &SGStorage[2] };
-  Merge(SGStorage[0], SG2, *this);
-#else
-  auto &SG0 = SGStorage[0];
-  std::vector<Subgraph*> V;
-  for (auto &Succ : SG0.Succs)
-    //if (Succ.first->ID==2)
-      V.push_back(Succ.first);
-  Merge(SG0, V, *this);
-  SG0.dump(dbgs());
-#endif
-#endif
-}
-#endif
-
-const GCNMinRegScheduler2::Subgraph::KillInfo
-&GCNMinRegScheduler2::Subgraph::getKills(const GCNMinRegScheduler2 &LSUSource) const {
-  if (!Kills.empty())
-    return Kills;
-
-  for (auto &LSU : List) {
-    const auto &Succs = LSU.SU->Succs;
-    if (Succs.size() <= 1)
-      continue;
-
-    std::set<Subgraph*> Killers;
-    for (const auto &Succ : Succs) {
-      if (!Succ.isAssignedRegDep())
-        continue;
-      auto *SuccR = LSUSource.getLSU(Succ.getSUnit()).Parent;
-      if (SuccR != this)
-        Killers.insert(SuccR);
-    }
-
-    if (!Killers.empty())
-      Kills[Killers]++;
-  }
-  return Kills;
-}
-
 // return the set of successors that aren't dependent on each other that is can be scheduled
 // right after this subgraph in arbitrary order
 std::set<GCNMinRegScheduler2::Subgraph*> GCNMinRegScheduler2::Subgraph::getDirectSuccs() const {
@@ -970,45 +900,16 @@ std::set<GCNMinRegScheduler2::Subgraph*> GCNMinRegScheduler2::Subgraph::getDirec
   return DirectSuccs;
 }
 
-// return true if S2 is a subset of S1
-template <typename Set1, typename Set2>
-bool contains(const Set1 &S1, const Set2 &S2) {
-  if (S2.size() > S1.size())
-    return false;
-  for (const auto &Key : S2) {
-    if (S1.count(Key) == 0)
-      return false;
-  }
-  return true;
-}
-#if 1
-GCNMinRegScheduler2::Subgraph::KillInfo
-GCNMinRegScheduler2::Subgraph::getMergeGroups(const GCNMinRegScheduler2 &LSUSource) {
-  KillInfo Res;
-  const auto Succs = getDirectSuccs();
-  for (const auto &K : getKills(LSUSource)) {
-    if (contains(Succs, K.first)) {
-      auto S = K.first;
-      S.insert(this);
-      Res.emplace(S, K.second);
-    }
-  }
-  return Res;
-}
-#else
-
-GCNMinRegScheduler2::Subgraph::KillInfo
-GCNMinRegScheduler2::Subgraph::getMergeGroups(const GCNMinRegScheduler2 &LSUSource) {
-  KillInfo MergeGroups;
-
+void GCNMinRegScheduler2::Subgraph::insertMergeGroups(MergeInfo &MergeGroups,
+                                        const GCNMinRegScheduler2 &LSUSource) {
+  if (Succs.empty()) return;
   const auto DirectSuccs = getDirectSuccs();
-
+  std::set<Subgraph*, SGIDOrder> DirectUsers;
   for (auto &LSU : List) {
     const auto &LSUSuccs = LSU.SU->Succs;
     if (LSUSuccs.size() <= 1)
       continue;
 
-    std::set<Subgraph*> DirectUsers;
     for (const auto &Succ : LSUSuccs) {
       if (!Succ.isAssignedRegDep())
         continue;
@@ -1027,20 +928,16 @@ GCNMinRegScheduler2::Subgraph::getMergeGroups(const GCNMinRegScheduler2 &LSUSour
       auto InsRes = MergeGroups.emplace(std::move(DirectUsers), 1);
       if (!InsRes.second)
         ++InsRes.first->second;
+      DirectUsers.clear();
     }
   }
-  return MergeGroups;
 }
-#endif
 
 void GCNMinRegScheduler2::merge() {
-  Subgraph::KillInfo Merges;
+  Subgraph::MergeInfo Merges;
   // collect merge groups
-  for (auto &SG : Subgraphs) {
-    if (SG.Succs.empty()) continue;
-    const auto MG = SG.getMergeGroups(*this);
-    Merges.insert(MG.begin(), MG.end());
-  }
+  for (auto &SG : Subgraphs)
+    SG.insertMergeGroups(Merges, *this);
 
   // build ambiguity map - subgraph is considered ambiguous if it's
   // being contained in more than one merge group
