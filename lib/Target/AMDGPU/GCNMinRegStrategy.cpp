@@ -386,12 +386,12 @@ class GCNMinRegScheduler2 {
 
     friend class GCNMinRegScheduler2::Merge;
 
-    template <typename I>
-    void mergeSchedule(I Begin, I End,
+    template <typename Range>
+    void mergeSchedule(Range &&R,
                        GCNMinRegScheduler2 &LSUSource);
 
     template <typename Range>
-    void commitMerge(const Range &Mergees);
+    void commitMerge(Range &&Mergees);
 
     void patchDepsAfterMerge(Subgraph *Mergee);
 
@@ -400,22 +400,24 @@ class GCNMinRegScheduler2 {
 
   class Merge {
     Subgraph &SG;
+    iterator_range<Subgraph::MergeSet::iterator> Range;
     GCNMinRegScheduler2 &LSUSource;
     bool Cancelled = false;
   public:
     Merge(Subgraph::MergeSet &Merges,
           GCNMinRegScheduler2 &LSUSource_)
       : SG(**Merges.begin())
+      , Range(drop_begin(Merges, 1))
       , LSUSource(LSUSource_) {
-      SG.mergeSchedule(std::next(Merges.begin()), Merges.end(), LSUSource);
+      SG.mergeSchedule(Range, LSUSource);
     }
     ~Merge() {
       if (!Cancelled)
         commit();
     }
     void commit() {
-      SG.commitMerge(Mergees);
-      for (auto *M : Mergees)
+      SG.commitMerge(Range);
+      for (auto *M : Range)
         LSUSource.Subgraphs.remove(*M);
     }
     void rollback() {
@@ -509,7 +511,7 @@ void GCNMinRegScheduler2::Subgraph::addLiveOut(LinkedSU &LSU,
 }
 
 template <typename Range>
-void GCNMinRegScheduler2::Subgraph::commitMerge(const Range &Mergees) {
+void GCNMinRegScheduler2::Subgraph::commitMerge(Range &&Mergees) {
   // set ownership on merged items
   for (auto &LSU : List)
     LSU.Parent = this;
@@ -710,8 +712,8 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
   return Chunks;
 }
 
-template <typename I>
-void GCNMinRegScheduler2::Subgraph::mergeSchedule(I Begin, I End,
+template <typename Range>
+void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
                                                   GCNMinRegScheduler2 &LSUSource) {
   updateOrderIndexes();
 
@@ -719,7 +721,7 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(I Begin, I End,
            std::vector<std::pair<Subgraph*, LSURange> > > Chunks;
 
   // collecting merge chunks
-  for (auto *M : make_range(Begin, End))
+  for (auto *M : Mergees)
     for(auto &P : M->getMergeChunks(this, LSUSource))
       Chunks[P.first].emplace_back(M, std::move(P.second));
 
@@ -984,8 +986,10 @@ void GCNMinRegScheduler2::merge() {
       break;
     // do the merge
     for (auto &MG : Merges)
-      if (MG.second)
-        Merge(MG.first, *this);
+      if (MG.second) {
+        auto Copy = MG.first;
+        Merge(Copy, *this);
+      }
   }
 }
 
