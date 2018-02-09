@@ -296,11 +296,12 @@ class GCNMinRegScheduler2 {
     const SUnit * const SU;
     Subgraph *Parent = nullptr;
     unsigned SGOrderIndex;
+    bool hasExternalSuccs : 1;
 
     const SUnit *operator->() const { return SU; }
     const SUnit *operator->() { return SU; }
 
-    LinkedSU(const SUnit &SU_) : SU(&SU_) {}
+    LinkedSU(const SUnit &SU_) : SU(&SU_), hasExternalSuccs(false) {}
 
     unsigned getNodeNum() const {
       assert(!SU->isBoundaryNode());
@@ -391,7 +392,7 @@ class GCNMinRegScheduler2 {
                        GCNMinRegScheduler2 &LSUSource);
 
     template <typename Range>
-    void commitMerge(Range &&Mergees);
+    void commitMerge(Range &&Mergees, const GCNMinRegScheduler2 &LSUSource);
 
     void patchDepsAfterMerge(Subgraph *Mergee);
 
@@ -416,7 +417,7 @@ class GCNMinRegScheduler2 {
         commit();
     }
     void commit() {
-      SG.commitMerge(Range);
+      SG.commitMerge(Range, LSUSource);
       for (auto *M : Range)
         LSUSource.Subgraphs.remove(*M);
     }
@@ -511,10 +512,23 @@ void GCNMinRegScheduler2::Subgraph::addLiveOut(LinkedSU &LSU,
 }
 
 template <typename Range>
-void GCNMinRegScheduler2::Subgraph::commitMerge(Range &&Mergees) {
+void GCNMinRegScheduler2::Subgraph::commitMerge(Range &&Mergees,
+                                        const GCNMinRegScheduler2& LSUSource) {
   // set ownership on merged items
   for (auto &LSU : List)
     LSU.Parent = this;
+
+  // patch hasExternalSuccs flag
+  for (auto &LSU : List) {
+    if (!LSU.hasExternalSuccs)
+      continue;
+    LSU.hasExternalSuccs = false;
+    for (const auto &Succ : LSU->Succs)
+      if (LSUSource.getLSU(Succ.getSUnit()).Parent != this) {
+        LSU.hasExternalSuccs = true;
+        break;
+      }
+  }
 
   for (auto *Mergee : Mergees) {
     // merge liveouts
@@ -856,9 +870,9 @@ std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
   return finalSchedule();
 }
 
-void GCNMinRegScheduler2::discoverSubgraph(Subgraph &R) {
+void GCNMinRegScheduler2::discoverSubgraph(Subgraph &SG) {
   std::vector<const SUnit*> Worklist;
-  Worklist.push_back(R.getBottomSU());
+  Worklist.push_back(SG.getBottomSU());
 
   do {
     auto *C = Worklist.back();
@@ -869,12 +883,13 @@ void GCNMinRegScheduler2::discoverSubgraph(Subgraph &R) {
         continue;
       auto &LSU = getLSU(P.getSUnit());
       if (!LSU.Parent) {
-        R.add(LSU, LiveOutRegs, MRI);
+        SG.add(LSU, LiveOutRegs, MRI);
         Worklist.push_back(LSU.SU);
-      } else if (LSU.Parent != &R) { // cross edge detected
+      } else if (LSU.Parent != &SG) { // cross edge detected
         auto Reg = P.isAssignedRegDep() ? P.getReg() : 0;
-        R.Preds[LSU.Parent].insert(Reg);
-        LSU.Parent->Succs[&R].insert(Reg);
+        SG.Preds[LSU.Parent].insert(Reg);
+        LSU.Parent->Succs[&SG].insert(Reg);
+        LSU.hasExternalSuccs = true;
       }
     }
   } while (!Worklist.empty());
@@ -1124,8 +1139,8 @@ private:
   }
 };
 
-void GCNMinRegScheduler2::scheduleSG(Subgraph &R) {
-  SGScheduler(R, *this).schedule();
+void GCNMinRegScheduler2::scheduleSG(Subgraph &SG) {
+  SGScheduler(SG, *this).schedule();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
