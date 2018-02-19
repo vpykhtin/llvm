@@ -314,7 +314,7 @@ class GCNMinRegScheduler2 {
 
     void print(raw_ostream &OS) const {
       OS << "SU" << getNodeNum() << ": ";
-      SU->getInstr()->print(OS);
+      OS << *SU->getInstr();
     }
   };
 
@@ -380,6 +380,12 @@ class GCNMinRegScheduler2 {
     }
 
     void dump(raw_ostream &O) const;
+
+#ifndef NDEBUG
+    bool isValidMergeTo(Subgraph *MergeTo) const { 
+      return !List.empty() && MergeTo->Succs.count(this) == 1;
+    }
+#endif
 
   private:
     void addLiveOut(LinkedSU &LSU,
@@ -708,8 +714,11 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
 
     DEBUG(dbgs() << "Chunk:\n";
       for (const auto &LSU : make_range(Begin, End))
-        LSU.print(dbgs());
-      dbgs() << "Lowest pred: "; RPT.getLowestPred()->print(dbgs());
+        dbgs() << *(LSU->getInstr()) << '\n';
+      if (auto *Lowest = RPT.getLowestPred())
+        dbgs() << "Lowest pred: " << *(*Lowest)->getInstr() << '\n';
+      else
+        dbgs() << "No predecessor\n";
     );
 
     // Normally every found chunk should depend on the earlier LSU (by exec
@@ -742,9 +751,11 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
            std::vector<std::pair<Subgraph*, LSURange> > > Chunks;
 
   // collecting merge chunks
-  for (auto *M : Mergees)
-    for(auto &P : M->getMergeChunks(this, LSUSource))
+  for (auto *M : Mergees) {
+    assert(M->isValidMergeTo(this));
+    for (auto &P : M->getMergeChunks(this, LSUSource))
       Chunks[P.first].emplace_back(M, std::move(P.second));
+  }
 
   // insert chunks into appropriate location
   DEBUG(dbgs() << "\nMerging in chunks\n");
@@ -837,7 +848,7 @@ void GCNMinRegScheduler2::setUnitDepthDirty(const SUnit &SU) const {
 ///////////////////////////////////////////////////////////////////////////////
 
 GCNMinRegScheduler2::GCNMinRegScheduler2(
-  ArrayRef<const SUnit*> BotRoots,
+  ArrayRef<const SUnit*> BotRoots_,
   const GCNRPTracker::LiveRegSet &LTRegs,
   const GCNRPTracker::LiveRegSet &LORegs,
   const ScheduleDAGMI &DAG)
@@ -847,6 +858,14 @@ GCNMinRegScheduler2::GCNMinRegScheduler2(
   , LiveOutRegs(LORegs)
   , LSUStorage(DAG.SUnits.begin(), DAG.SUnits.end())
   , UnitDepth(DAG.SUnits.size(), -1) {
+
+  std::vector<const SUnit*> BotRoots(BotRoots_.begin(), BotRoots_.end());
+  // sort deepest first
+  std::sort(BotRoots.begin(), BotRoots.end(),
+    [=](const SUnit *SU1, const SUnit *SU2) -> bool {
+      return getUnitDepth(*SU1) > getUnitDepth(*SU2);
+  });
+
   SGStorage.reserve(BotRoots.size());
   unsigned SubGraphID = 0;
   for (auto *SU : BotRoots) {
@@ -856,11 +875,6 @@ GCNMinRegScheduler2::GCNMinRegScheduler2(
 }
 
 std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
-  // sort deepest first
-  Subgraphs.sort([=](const Subgraph &R1, const Subgraph &R2) ->bool {
-    return getUnitDepth(*R1.getBottomSU()) > getUnitDepth(*R2.getBottomSU());
-  });
-
   for (auto &R : Subgraphs) {
     discoverSubgraph(R);
     scheduleSG(R);
@@ -868,11 +882,7 @@ std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
     //DEBUG(R.dump(dbgs()));
   }
 
-  DEBUG(writeGraph("subdags_original.dot"));
-
   merge();
-
-  //DEBUG(writeGraph("subdags_merged.dot"));
 
   return finalSchedule();
 }
@@ -1069,6 +1079,8 @@ GCNMinRegScheduler2::Subgraph::MergeInfo GCNMinRegScheduler2::getMerges() {
 }
 
 void GCNMinRegScheduler2::merge() {
+  DEBUG(writeGraph("subdags_original.dot"));
+  int I = 0;
   while(true) {
     auto Merges = getMerges();
     if (Merges.empty())
@@ -1079,6 +1091,7 @@ void GCNMinRegScheduler2::merge() {
         auto Copy = MG.first;
         Merge(Copy, *this);
       }
+    DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
 }
 
@@ -1267,7 +1280,7 @@ void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O) const {
   O << "Subgraph " << ID << '\n';
   for (const auto &LSU : make_range(List.rbegin(), List.rend())) {
     dbgs() << "SU" << LSU.getNodeNum() << ": ";
-    LSU.SU->getInstr()->print(O);
+    O << *(LSU->getInstr());
   }
   O << '\n';
 }
@@ -1283,7 +1296,7 @@ bool GCNMinRegScheduler2::isExpanded(const Subgraph &R) {
    // { 0, 1 };
 
   //  { 0, 1 };
-  {};
+  { };
 
   //{ 62, 63 };
 
@@ -1380,7 +1393,7 @@ void GCNMinRegScheduler2::writeLSU(raw_ostream &O, const LinkedSU &LSU) const {
   if (NumCons > 0)
     O << " C(" << NumCons << ')';
   O << '|';
-  SU.getInstr()->print(O, /*SkipOpers=*/true);
+  SU.getInstr()->print(O, /*IsStandalone=*/ false, /*SkipOpers=*/true);
   O << "}\"];\n";
 }
 

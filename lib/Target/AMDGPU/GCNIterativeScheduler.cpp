@@ -116,14 +116,14 @@ static void printRegion(raw_ostream &OS,
   for (; I != End && MaxInstNum; ++I, --MaxInstNum) {
     if (!I->isDebugInstr() && LIS)
       OS << LIS->getInstructionIndex(*I);
-    OS << '\t' << *I;
+    OS << '\t' << *I << '\n';
   }
   if (I != End) {
     OS << "\t...\n";
     I = std::prev(End);
     if (!I->isDebugInstr() && LIS)
       OS << LIS->getInstructionIndex(*I);
-    OS << '\t' << *I;
+    OS << '\t' << *I << '\n';
   }
   if (End != BB->end()) { // print boundary inst if present
     OS << "----\n";
@@ -223,8 +223,8 @@ bool GCNIterativeScheduler::validateSchedule(const Region &R,
       ++IC[SU->getInstr()];
     for(const auto &P : IC)
       if (P.second == 1) {
-        dbgs() << "Missing ";
-        P.first->print(dbgs());
+        dbgs() << "Missing " << *P.first << '\n';
+        //P.first->print(dbgs());
       }
     //Res = false; // TODO: uncomment this
   }
