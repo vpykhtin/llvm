@@ -354,19 +354,25 @@ class GCNMinRegScheduler2 {
       return Regs.size();
     }
 
-    struct SGIDOrder {
-      bool operator()(const Subgraph *SG1, const Subgraph *SG2) const {
-        return SG1->ID < SG2->ID;
+    struct MergeSet {
+      Subgraph *Center;
+      std::set<Subgraph*> Mergees;
+
+      bool empty() const { return Mergees.empty(); }
+      void clear() { Mergees.clear(); }
+
+      bool operator<(const MergeSet &RHS) const {
+        return Center != RHS.Center ?
+          (Center < RHS.Center) :
+          (Mergees < RHS.Mergees);
       }
     };
-
-    typedef std::set<Subgraph*, SGIDOrder> MergeSet;
     typedef std::map<MergeSet, unsigned> MergeInfo;
 
     template <typename Set>
     void insertMerges(MergeInfo &MergeGroups,
-                           const Set &Tier,
-                           const GCNMinRegScheduler2 &LSUSource);
+                      const Set &Tier,
+                      const GCNMinRegScheduler2 &LSUSource);
 
     using LSURange = decltype(make_range(List.begin(),List.end()));
 
@@ -407,30 +413,28 @@ class GCNMinRegScheduler2 {
   };
 
   class Merge {
-    Subgraph &SG;
-    iterator_range<Subgraph::MergeSet::iterator> Range;
+    Subgraph::MergeSet &Merges;
     GCNMinRegScheduler2 &LSUSource;
     bool Cancelled = false;
   public:
-    Merge(Subgraph::MergeSet &Merges,
+    Merge(Subgraph::MergeSet &Merges_,
           GCNMinRegScheduler2 &LSUSource_)
-      : SG(**Merges.begin())
-      , Range(drop_begin(Merges, 1))
+      : Merges(Merges_)
       , LSUSource(LSUSource_) {
-      SG.mergeSchedule(Range, LSUSource);
+      Merges.Center->mergeSchedule(Merges.Mergees, LSUSource);
     }
     ~Merge() {
       if (!Cancelled)
         commit();
     }
     void commit() {
-      SG.commitMerge(Range, LSUSource);
-      for (auto *M : Range)
+      Merges.Center->commitMerge(Merges.Mergees, LSUSource);
+      for (auto *M : Merges.Mergees)
         LSUSource.Subgraphs.remove(*M);
     }
     void rollback() {
       if (!Cancelled) {
-        SG.rollbackMerge();
+        Merges.Center->rollbackMerge();
         Cancelled = true;
       }
     }
@@ -476,10 +480,16 @@ private:
 
   void scheduleSG(Subgraph &R);
 
+  std::vector<BitVector> getMergeSetMasks(const Subgraph::MergeInfo &Merges) const;
+
   class AmbiguityMatrix;
   AmbiguityMatrix getAmbiguityMatrix(const Subgraph::MergeInfo &Merges) const;
+  AmbiguityMatrix getAmbiguityMatrix(const Subgraph::MergeInfo &Merges,
+                                     const Subgraph::MergeInfo &TierMerges) const;
 
   void disambiguateMerges(Subgraph::MergeInfo &Merges);
+  void disambiguateCrossTierMerges(Subgraph::MergeInfo &Merges,
+                                   Subgraph::MergeInfo &TierMerges);
 
   Subgraph::MergeInfo getMerges();
 
@@ -955,16 +965,23 @@ public:
   }
 };
 
-GCNMinRegScheduler2::AmbiguityMatrix
-GCNMinRegScheduler2::getAmbiguityMatrix(const Subgraph::MergeInfo &Merges) const {
+std::vector<BitVector>
+GCNMinRegScheduler2::getMergeSetMasks(const Subgraph::MergeInfo &Merges) const {
   std::vector<BitVector> SetMasks;
   SetMasks.reserve(Merges.size());
   for (auto &P : Merges) {
     SetMasks.emplace_back(BitVector(SGStorage.size()));
     auto &SetMask = SetMasks.back();
-    for (auto *SG : P.first)
-      SetMask.set(SG->ID);
+    SetMask.set(P.first.Center->ID);
+    for (auto *M : P.first.Mergees)
+      SetMask.set(M->ID);
   }
+  return SetMasks;
+}
+
+GCNMinRegScheduler2::AmbiguityMatrix
+GCNMinRegScheduler2::getAmbiguityMatrix(const Subgraph::MergeInfo &Merges) const {
+  const auto SetMasks = getMergeSetMasks(Merges);
   AmbiguityMatrix AM(Merges.size());
   for (unsigned I = 0, E = Merges.size(); I < E; ++I)
     for (unsigned J = I + 1; J < E; ++J)
@@ -1007,6 +1024,62 @@ void GCNMinRegScheduler2::disambiguateMerges(Subgraph::MergeInfo &Merges) {
     Merges.erase(IdxToMerge[I]);
 }
 
+GCNMinRegScheduler2::AmbiguityMatrix
+GCNMinRegScheduler2::getAmbiguityMatrix(const Subgraph::MergeInfo &Merges,
+                                        const Subgraph::MergeInfo &TierMerges) const {
+  const auto MergesSetMasks = getMergeSetMasks(Merges);
+  const auto TierMergesSetMasks = getMergeSetMasks(TierMerges);
+  AmbiguityMatrix AM(Merges.size() + TierMerges.size());
+  for (unsigned I = 0, E1 = Merges.size(); I < E1; ++I)
+    for (unsigned J = 0, E2 = TierMerges.size(); J < E2; ++J)
+      if (MergesSetMasks[I].anyCommon(TierMergesSetMasks[J]))
+        AM.set(I, E1 + J);
+  return AM;
+}
+
+void GCNMinRegScheduler2::disambiguateCrossTierMerges(Subgraph::MergeInfo &Merges,
+                                                      Subgraph::MergeInfo &TierMerges) {
+  if (Merges.empty() || TierMerges.empty())
+    return;
+
+  std::vector<Subgraph::MergeInfo::iterator> IdxToMerge;
+  IdxToMerge.reserve(Merges.size() + TierMerges.size());
+  for (auto I = Merges.begin(), E = Merges.end(); I != E; ++I)
+    IdxToMerge.push_back(I);
+  for (auto I = TierMerges.begin(), E = TierMerges.end(); I != E; ++I)
+    IdxToMerge.push_back(I);
+
+  auto AM = getAmbiguityMatrix(Merges, TierMerges);
+  auto Worklist = AM.getWorklist();
+  while (!Worklist.empty()) {
+    auto MostIncidentI = std::max_element(Worklist.begin(), Worklist.end(),
+      [&AM](unsigned I, unsigned J) -> bool {
+      return AM[I].size() < AM[J].size();
+    });
+    auto MostIncident = *MostIncidentI;
+    Worklist.erase(MostIncidentI);
+
+    auto &Incidents = AM[MostIncident];
+    if (Incidents.empty())
+      break;
+
+    unsigned SumConsumedRegs = 0;
+    for (auto J : Incidents)
+      SumConsumedRegs += IdxToMerge[J]->second;
+
+    if (IdxToMerge[MostIncident]->second <= SumConsumedRegs)
+      AM.erase(MostIncident);
+    else
+      AM.eraseIncident(MostIncident);
+  }
+
+  for (auto I : AM.erased())
+    if (I < Merges.size())
+      Merges.erase(IdxToMerge[I]);
+    else
+      TierMerges.erase(IdxToMerge[I]);
+}
+
 template <typename Set>
 void GCNMinRegScheduler2::Subgraph::insertMerges(MergeInfo &Merges,
                                         const Set &Tier,
@@ -1026,11 +1099,11 @@ void GCNMinRegScheduler2::Subgraph::insertMerges(MergeInfo &Merges,
         MS.clear();
         break;
       } else
-        MS.insert(SuccSG);
+        MS.Mergees.insert(SuccSG);
     }
 
     if (!MS.empty()) {
-      MS.insert(this);
+      MS.Center = this;
       auto InsRes = Merges.emplace(std::move(MS), 1);
       if (!InsRes.second)
         ++InsRes.first->second;
@@ -1072,6 +1145,7 @@ GCNMinRegScheduler2::Subgraph::MergeInfo GCNMinRegScheduler2::getMerges() {
   Subgraph::MergeInfo TierMerges;
   while (M.nextTier(TierMerges)) {
     disambiguateMerges(TierMerges);
+    //disambiguateCrossTierMerges(Merges, TierMerges);
     Merges.insert(TierMerges.begin(), TierMerges.end());
     TierMerges.clear();
   }
