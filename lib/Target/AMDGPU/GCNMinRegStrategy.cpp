@@ -317,7 +317,7 @@ class GCNMinRegScheduler2 {
     }
   };
 
-  class Merge;
+  class OneTierMerge;
   struct Subgraph : ilist_node<Subgraph> {
     unsigned ID;
     simple_ilist<LinkedSU> List;
@@ -392,6 +392,14 @@ class GCNMinRegScheduler2 {
     typedef std::map<MergeSet, unsigned> MergeInfo;
 
     template <typename Set>
+    bool dependsOn(const Set &SGSet) {
+      for (const auto &Pred : Preds)
+        if (SGSet.count(Pred.first) != 0)
+          return true;
+      return false;
+    }
+
+    template <typename Set>
     void insertMerges(MergeInfo &MergeGroups,
                       const Set &Tier,
                       const GCNMinRegScheduler2 &LSUSource);
@@ -400,6 +408,9 @@ class GCNMinRegScheduler2 {
 
     std::map<LinkedSU*, LSURange, LSUExecOrder>
       getMergeChunks(Subgraph *MergeTo, GCNMinRegScheduler2 &LSUSource);
+
+    void merge(const decltype(MergeSet::Mergees) &Mergees,
+               GCNMinRegScheduler2 &LSUSource);
 
     void updateOrderIndexes() {
       unsigned I = 0;
@@ -420,7 +431,7 @@ class GCNMinRegScheduler2 {
                     const GCNRPTracker::LiveRegSet &RegionLiveOutRegs,
                     const MachineRegisterInfo &MRI);
 
-    friend class GCNMinRegScheduler2::Merge;
+    friend class GCNMinRegScheduler2::OneTierMerge;
 
     template <typename Range>
     void mergeSchedule(Range &&R,
@@ -434,18 +445,18 @@ class GCNMinRegScheduler2 {
     void rollbackMerge();
   };
 
-  class Merge {
-    Subgraph::MergeSet &Merges;
+  class OneTierMerge {
+    const Subgraph::MergeSet &Merges;
     GCNMinRegScheduler2 &LSUSource;
     bool Cancelled = false;
   public:
-    Merge(Subgraph::MergeSet &Merges_,
+    OneTierMerge(const Subgraph::MergeSet &Merges_,
           GCNMinRegScheduler2 &LSUSource_)
       : Merges(Merges_)
       , LSUSource(LSUSource_) {
       Merges.Center->mergeSchedule(Merges.Mergees, LSUSource);
     }
-    ~Merge() {
+    ~OneTierMerge() {
       if (!Cancelled)
         commit();
     }
@@ -507,7 +518,8 @@ private:
   void disambiguateMerges(Subgraph::MergeInfo &Merges);
   void removeInefficientMerges(Subgraph::MergeInfo &Merges);
 
-  Subgraph::MergeInfo getMerges();
+  Subgraph::MergeInfo getOneTierMerges();
+  Subgraph::MergeInfo getMultiTierMerges();
 
   void merge();
   std::vector<const SUnit*> finalSchedule();
@@ -706,8 +718,6 @@ public:
   }
 };
 
-#if 1
-
 struct GCNMinRegScheduler2::LSUExecOrder {
   bool operator()(const LinkedSU *LSU1, const LinkedSU *LSU2) {
     // SGOrderIndex indexes are numbered from the bottom of a schedule
@@ -799,8 +809,21 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
   //DEBUG(dump(dbgs()));
 }
 
-#endif
-
+void GCNMinRegScheduler2::Subgraph::merge(const decltype(MergeSet::Mergees) &Mergees,
+                                          GCNMinRegScheduler2 &LSUSource) {
+  std::list<Subgraph*> Worklist(Mergees.begin(), Mergees.end());
+  while (!Worklist.empty()) {
+    MergeSet MS = { this };
+    for (auto I = Worklist.begin(), E = Worklist.end(); I != E;) {
+      auto This = I++;
+      if (!(*This)->dependsOn(Mergees)) {
+        MS.Mergees.insert(*This);
+        Worklist.erase(This);
+      }
+    }
+    OneTierMerge(MS, LSUSource);
+  }
+}
 
 // returns the number of SU successors belonging to R
 unsigned GCNMinRegScheduler2::getSubgraphSuccNum(const LinkedSU &LSU) const {
@@ -1086,7 +1109,7 @@ void GCNMinRegScheduler2::Subgraph::insertMerges(MergeInfo &Merges,
   }
 }
 
-GCNMinRegScheduler2::Subgraph::MergeInfo GCNMinRegScheduler2::getMerges() {
+GCNMinRegScheduler2::Subgraph::MergeInfo GCNMinRegScheduler2::getOneTierMerges() {
   Subgraph::MergeInfo Merges;
   std::vector<unsigned> NumSuccs(SGStorage.size());
   std::set<const Subgraph*> Tier;
@@ -1111,33 +1134,51 @@ GCNMinRegScheduler2::Subgraph::MergeInfo GCNMinRegScheduler2::getMerges() {
   return Merges;
 }
 
+GCNMinRegScheduler2::Subgraph::MergeInfo GCNMinRegScheduler2::getMultiTierMerges() {
+  auto MaxI = std::max_element(Subgraphs.begin(), Subgraphs.end(),
+    [=](const Subgraph &SG1, const Subgraph &SG2)->bool {
+      return SG1.getNumLiveOut() < SG2.getNumLiveOut();
+  });
+  Subgraph::MergeInfo Merges;
+  if (auto N = MaxI->getNumLiveOut()) {
+    Subgraph::MergeSet MS = { &*MaxI };
+    for (auto &Succ : MaxI->Succs)
+      MS.Mergees.insert(Succ.first);
+    Merges.emplace(std::move(MS), N);
+  }
+  return Merges;
+}
+
 void GCNMinRegScheduler2::merge() {
   DEBUG(writeGraph("subdags_original.dot"));
   int I = 0;
   while(true) {
-    auto Merges = getMerges();
+    auto Merges = getOneTierMerges();
     if (Merges.empty())
       break;
-    // do the merge
-    for (auto &MG : Merges)
-      if (MG.second) {
-        auto Copy = MG.first;
-        Merge(Copy, *this);
-      }
+    for (auto &M : Merges)
+      OneTierMerge(M.first, *this);
     DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
 
 #if 1
+  while (true) {
+    auto Merges = getMultiTierMerges();
+    if (Merges.empty())
+      break;
+    for (auto &M : Merges)
+      M.first.Center->merge(M.first.Mergees, *this);
+    DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
+  }
+#else
   Subgraph::MergeSet S1 = { &SGStorage[0], { &SGStorage[19] } };
-  Merge(S1, *this);
-#endif
+  OneTierMerge(S1, *this);
 
-#if 1
   Subgraph::MergeSet S2 = { &SGStorage[0], { } };
   for (auto &Succ : SGStorage[0].Succs)
     S2.Mergees.insert(Succ.first);
 
-  Merge(S2, *this);
+  OneTierMerge(S2, *this);
   //SG0.dump(dbgs());
 #endif
 }
@@ -1343,7 +1384,7 @@ bool GCNMinRegScheduler2::isExpanded(const Subgraph &R) {
    // { 0, 1 };
 
   //  { 0, 1 };
-  {  0, 19 };
+  { };
 
   //{ 62, 63 };
 
