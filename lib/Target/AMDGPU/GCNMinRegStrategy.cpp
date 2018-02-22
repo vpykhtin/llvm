@@ -290,7 +290,6 @@ class GCNMinRegScheduler2 {
   struct Subgraph;
   class SGScheduler;
   class SGRPTracker;
-  class Merger;
   struct LSUExecOrder;
 
   struct LinkedSU : ilist_node<LinkedSU> {
@@ -1087,37 +1086,26 @@ void GCNMinRegScheduler2::Subgraph::insertMerges(MergeInfo &Merges,
   }
 }
 
-class GCNMinRegScheduler2::Merger {
-  GCNMinRegScheduler2 &Sch;
-  std::vector<unsigned> NumSuccs;
+GCNMinRegScheduler2::Subgraph::MergeInfo GCNMinRegScheduler2::getMerges() {
+  Subgraph::MergeInfo Merges;
+  std::vector<unsigned> NumSuccs(SGStorage.size());
   std::set<const Subgraph*> Tier;
-public:
-  Merger(GCNMinRegScheduler2 &Sch_)
-    : Sch(Sch_)
-    , NumSuccs(Sch_.SGStorage.size()) {
-    for (const auto &SG : Sch.Subgraphs)
-      if (!SG.Succs.empty())
-        NumSuccs[SG.ID] = SG.Succs.size();
-      else
-        Tier.insert(&SG);
+  for (const auto &SG : Subgraphs) {
+    if (!SG.Succs.empty())
+      NumSuccs[SG.ID] = SG.Succs.size();
+    else
+      Tier.insert(&SG);
   }
-  bool nextTier(Subgraph::MergeInfo &Merges) {
+  while (!Tier.empty()) {
     decltype(Tier) NextTier;
     for (const auto *SG : Tier)
       for (const auto &Pred : SG->Preds)
         if (0 == --NumSuccs[Pred.first->ID]) {
           NextTier.insert(Pred.first);
-          Pred.first->insertMerges(Merges, Tier, Sch);
+          Pred.first->insertMerges(Merges, Tier, *this);
         }
     Tier = std::move(NextTier);
-    return !Tier.empty();
   }
-};
-
-GCNMinRegScheduler2::Subgraph::MergeInfo GCNMinRegScheduler2::getMerges() {
-  Merger M(*this);
-  Subgraph::MergeInfo Merges;
-  while (M.nextTier(Merges));
   removeInefficientMerges(Merges);
   disambiguateMerges(Merges);
   return Merges;
