@@ -392,11 +392,23 @@ class GCNMinRegScheduler2 {
     typedef std::map<MergeSet, unsigned> MergeInfo;
 
     template <typename Set>
-    bool dependsOn(const Set &SGSet) {
+    bool dependsOn(const Set &SGSet) const {
       for (const auto &Pred : Preds)
         if (SGSet.count(Pred.first) != 0)
           return true;
       return false;
+    }
+
+    std::set<Subgraph*> getDirectSuccs() const {
+      std::set<Subgraph*> SuccSet;
+      for (auto &P : Succs)
+        SuccSet.insert(P.first);
+      for (auto I = SuccSet.begin(), E = SuccSet.end(); I != E;) {
+        auto This = I++;
+        if ((*This)->dependsOn(SuccSet))
+          SuccSet.erase(This);
+      }
+      return SuccSet;
     }
 
     template <typename Set>
@@ -1111,24 +1123,9 @@ void GCNMinRegScheduler2::Subgraph::insertMerges(MergeInfo &Merges,
 
 GCNMinRegScheduler2::Subgraph::MergeInfo GCNMinRegScheduler2::getOneTierMerges() {
   Subgraph::MergeInfo Merges;
-  std::vector<unsigned> NumSuccs(SGStorage.size());
-  std::set<const Subgraph*> Tier;
-  for (const auto &SG : Subgraphs) {
+  for (auto &SG : Subgraphs)
     if (!SG.Succs.empty())
-      NumSuccs[SG.ID] = SG.Succs.size();
-    else
-      Tier.insert(&SG);
-  }
-  while (!Tier.empty()) {
-    decltype(Tier) NextTier;
-    for (const auto *SG : Tier)
-      for (const auto &Pred : SG->Preds)
-        if (0 == --NumSuccs[Pred.first->ID]) {
-          NextTier.insert(Pred.first);
-          Pred.first->insertMerges(Merges, Tier, *this);
-        }
-    Tier = std::move(NextTier);
-  }
+      SG.insertMerges(Merges, SG.getDirectSuccs(), *this);
   removeInefficientMerges(Merges);
   disambiguateMerges(Merges);
   return Merges;
@@ -1161,7 +1158,7 @@ void GCNMinRegScheduler2::merge() {
     DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
 
-#if 1
+#if 0
   while (true) {
     auto Merges = getMultiTierMerges();
     if (Merges.empty())
@@ -1170,7 +1167,9 @@ void GCNMinRegScheduler2::merge() {
       M.first.Center->merge(M.first.Mergees, *this);
     DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
-#else
+#endif
+
+#if 0
   Subgraph::MergeSet S1 = { &SGStorage[0], { &SGStorage[19] } };
   OneTierMerge(S1, *this);
 
