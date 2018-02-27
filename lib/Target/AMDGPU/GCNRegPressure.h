@@ -15,6 +15,7 @@
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/RegisterPressure.h"
 #include "llvm/CodeGen/SlotIndexes.h"
 #include "llvm/MC/LaneBitmask.h"
 #include "llvm/Support/Debug.h"
@@ -99,7 +100,7 @@ public:
 
 protected:
   const LiveIntervals &LIS;
-  LiveRegSet LiveRegs;
+  LiveRegSet LiveRegs, IgnoreRegUses;
   GCNRegPressure CurPressure, MaxPressure;
   const MachineInstr *LastTrackedMI = nullptr;
   mutable const MachineRegisterInfo *MRI = nullptr;
@@ -108,6 +109,9 @@ protected:
 
   void reset(const MachineInstr &MI, const LiveRegSet *LiveRegsCopy,
              bool After);
+
+  void collectVirtualRegUses(const MachineInstr &MI,
+                             SmallVectorImpl<RegisterMaskPair> &Res) const;
 
 public:
   // live regs for the current state

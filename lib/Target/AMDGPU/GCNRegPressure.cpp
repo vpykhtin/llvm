@@ -16,7 +16,6 @@
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/CodeGen/RegisterPressure.h"
 #include "llvm/CodeGen/SlotIndexes.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/Config/llvm-config.h"
@@ -223,28 +222,32 @@ LaneBitmask llvm::getUsedRegMask(const MachineOperand &MO,
   return getLiveLaneMask(MO.getReg(), SI, LIS, MRI);
 }
 
-static SmallVector<RegisterMaskPair, 8>
-collectVirtualRegUses(const MachineInstr &MI, const LiveIntervals &LIS,
-                      const MachineRegisterInfo &MRI) {
-  SmallVector<RegisterMaskPair, 8> Res;
+void GCNRPTracker::collectVirtualRegUses(const MachineInstr &MI,
+                                 SmallVectorImpl<RegisterMaskPair> &Res) const {
   for (const auto &MO : MI.operands()) {
     if (!MO.isReg() || !TargetRegisterInfo::isVirtualRegister(MO.getReg()))
       continue;
     if (!MO.isUse() || !MO.readsReg())
       continue;
 
-    auto const UsedMask = getUsedRegMask(MO, MRI, LIS);
-
+    auto UsedMask = getUsedRegMask(MO, *MRI, LIS);
     auto Reg = MO.getReg();
-    auto I = std::find_if(Res.begin(), Res.end(), [Reg](const RegisterMaskPair &RM) {
-      return RM.RegUnit == Reg;
+    auto IgnoreReg = IgnoreRegUses.find(Reg);
+    if (IgnoreReg != IgnoreRegUses.end()) {
+      UsedMask &= ~IgnoreReg->second;
+      if (UsedMask.none())
+        continue;
+    }
+
+    auto I = std::find_if(Res.begin(), Res.end(),
+      [Reg](const RegisterMaskPair &RM) {
+        return RM.RegUnit == Reg;
     });
     if (I != Res.end())
       I->LaneMask |= UsedMask;
     else
       Res.push_back(RegisterMaskPair(Reg, UsedMask));
   }
-  return Res;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -379,7 +382,8 @@ void GCNUpwardRPTracker::recede(const MachineInstr &MI) {
   if (MI.isDebugValue())
     return;
 
-  auto const RegUses = collectVirtualRegUses(MI, LIS, *MRI);
+  SmallVector<RegisterMaskPair, 8> RegUses;
+  collectVirtualRegUses(MI, RegUses);
 
   // calc pressure at the MI (defs + uses)
   auto AtMIPressure = CurPressure;
