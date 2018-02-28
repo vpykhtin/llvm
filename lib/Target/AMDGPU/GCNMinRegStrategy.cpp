@@ -399,15 +399,31 @@ class GCNMinRegScheduler2 {
       return false;
     }
 
+    bool hasIndirectPathTo(const Subgraph &ToSG) const {
+      std::vector<const Subgraph*> Worklist;
+      Worklist.reserve(32);
+      for (auto &P : Preds) {
+        if (P.first != &ToSG) // first Pred is the direct path ;)
+          Worklist.push_back(P.first);
+      }
+      while (!Worklist.empty()) {
+        auto *SG = Worklist.back();
+        Worklist.pop_back();
+        for (auto &P : SG->Preds) {
+          if (P.first == &ToSG)
+            return true;
+          Worklist.push_back(P.first);
+        }
+      }
+      return false;
+    }
+
     std::set<Subgraph*> getDirectSuccs() const {
       std::set<Subgraph*> SuccSet;
       for (auto &P : Succs)
-        SuccSet.insert(P.first);
-      for (auto I = SuccSet.begin(), E = SuccSet.end(); I != E;) {
-        auto This = I++;
-        if ((*This)->dependsOn(SuccSet))
-          SuccSet.erase(This);
-      }
+        if (P.first->Preds.size() == 1 ||
+            !P.first->hasIndirectPathTo(*this))
+          SuccSet.insert(P.first);
       return SuccSet;
     }
 
@@ -1158,7 +1174,7 @@ void GCNMinRegScheduler2::merge() {
     DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
 
-#if 0
+#if 1
   while (true) {
     auto Merges = getMultiTierMerges();
     if (Merges.empty())

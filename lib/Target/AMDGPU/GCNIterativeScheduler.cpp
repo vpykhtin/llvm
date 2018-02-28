@@ -128,7 +128,7 @@ static void printRegion(raw_ostream &OS,
   if (End != BB->end()) { // print boundary inst if present
     OS << "----\n";
     if (LIS) OS << LIS->getInstructionIndex(*End) << '\t';
-    OS << *End;
+    OS << *End << '\n';
   }
 }
 
