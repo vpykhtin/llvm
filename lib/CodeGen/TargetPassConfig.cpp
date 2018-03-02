@@ -1080,6 +1080,12 @@ void TargetPassConfig::addOptimizedRegAlloc(FunctionPass *RegAllocPass) {
   if (EarlyLiveIntervals)
     addPass(&LiveIntervalsID, false);
 
+#define EARLY_SCHED
+#ifdef EARLY_SCHED
+  addPass(&RenameIndependentSubregsID);
+  addPass(&MachineSchedulerID);
+#endif
+
   addPass(&TwoAddressInstructionPassID, false);
   addPass(&RegisterCoalescerID);
 
@@ -1088,8 +1094,10 @@ void TargetPassConfig::addOptimizedRegAlloc(FunctionPass *RegAllocPass) {
   // separate vregs before. Splitting can also improve reg. allocation quality.
   addPass(&RenameIndependentSubregsID);
 
+#ifndef EARLY_SCHED
   // PreRA instruction scheduling.
   addPass(&MachineSchedulerID);
+#endif
 
   if (RegAllocPass) {
     // Add the selected register allocation pass.
