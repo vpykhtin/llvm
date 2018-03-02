@@ -776,15 +776,6 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
       RPT.recede();
     auto End = RPT.getCur().getIterator();
 
-    DEBUG(dbgs() << "Chunk:\n";
-      for (const auto &LSU : make_range(Begin, End))
-        dbgs() << *(LSU->getInstr()) << '\n';
-      if (auto *Lowest = RPT.getLowestPred())
-        dbgs() << "Lowest pred: " << *(*Lowest)->getInstr() << '\n';
-      else
-        dbgs() << "No predecessor\n";
-    );
-
     // Normally every found chunk should depend on the earlier LSU (by exec
     // order) in the MergeTo schedule which means it should be placed in the
     // beginning of the Chunks map as it's sorted in execution order.
@@ -822,12 +813,26 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
   }
 
   // insert chunks into appropriate location
-  DEBUG(dbgs() << "\nMerging in chunks\n");
   for (const auto &C : Chunks) {
     auto InsPoint = C.first ? C.first->getIterator() : List.end();
-    for(const auto &R : C.second)
-      List.splice(InsPoint, R.first->List,
-                  R.second.begin(), std::next(R.second.end()));
+    for (const auto &R : C.second) {
+      auto &MergeeSG = *R.first;
+      auto &MRange = R.second;
+
+      DEBUG(dbgs() << "\nMerging into SG" << ID
+        << " chunk from SG" << MergeeSG.ID << ":\n";
+        if (auto *Lowest = C.first)
+          dbgs() << "Lowest pred: " << *(*Lowest)->getInstr() << '\n';
+        else
+          dbgs() << "No predecessor\n";
+        for (const auto &LSU : make_range(MRange.end()->getReverseIterator(),
+                                std::next(MRange.begin()->getReverseIterator())))
+          dbgs() << *(LSU->getInstr()) << '\n';
+      );
+
+      List.splice(InsPoint, MergeeSG.List,
+        MRange.begin(), std::next(MRange.end()));
+    }
   }
 
 #ifndef NDEBUG
@@ -1139,9 +1144,10 @@ void GCNMinRegScheduler2::Subgraph::insertMerges(MergeInfo &Merges,
 
 GCNMinRegScheduler2::Subgraph::MergeInfo GCNMinRegScheduler2::getOneTierMerges() {
   Subgraph::MergeInfo Merges;
-  for (auto &SG : Subgraphs)
+  for (auto &SG : Subgraphs) {
     if (!SG.Succs.empty())
       SG.insertMerges(Merges, SG.getDirectSuccs(), *this);
+  }
   removeInefficientMerges(Merges);
   disambiguateMerges(Merges);
   return Merges;
@@ -1399,7 +1405,8 @@ bool GCNMinRegScheduler2::isExpanded(const Subgraph &R) {
    // { 0, 1 };
 
   //  { 0, 1 };
-  { };
+  // { 0, 5, 3, 25 };
+  {};
 
   //{ 62, 63 };
 
