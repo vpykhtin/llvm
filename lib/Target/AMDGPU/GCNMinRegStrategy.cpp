@@ -822,12 +822,12 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
       DEBUG(dbgs() << "\nMerging into SG" << ID
         << " chunk from SG" << MergeeSG.ID << ":\n";
         if (auto *Lowest = C.first)
-          dbgs() << "Lowest pred: " << *(*Lowest)->getInstr() << '\n';
+          dbgs() << "Lowest pred: " << *(*Lowest)->getInstr();
         else
           dbgs() << "No predecessor\n";
         for (const auto &LSU : make_range(MRange.end()->getReverseIterator(),
                                 std::next(MRange.begin()->getReverseIterator())))
-          dbgs() << *(LSU->getInstr()) << '\n';
+          dbgs() << *(LSU->getInstr());
       );
 
       List.splice(InsPoint, MergeeSG.List,
@@ -1441,14 +1441,16 @@ static const char *getDepColor(SDep::Kind K) {
 
 void GCNMinRegScheduler2::writeSubgraph(raw_ostream &O, const Subgraph &R) const {
   auto SubGraphID = R.ID;
+  R.LiveOutRegs;
   O << "\tSubgraph" << SubGraphID
     << " [shape=record, style=\"filled\""
     << ", rank=" << getUnitDepth(*R.getBottomSU())
     << ", fillcolor=\"#" << DOT::getColorString(SubGraphID) << '"'
-    << ", label = \"{Subgraph " << SubGraphID
-    << "| IC=" << R.List.size()
-    << ", LO=" << R.getNumLiveOut()
-    << "}\"];\n";
+    << ", label = \"{{SG" << SubGraphID
+    << " (" << R.List.size()
+    << "MI)}|{LO=" << R.getNumLiveOut()
+    << " | BR=" << R.getNumBottomRoots()
+    << "}}\"];\n";
 }
 
 void GCNMinRegScheduler2::writeLinks(raw_ostream &O, const Subgraph &R) const {
