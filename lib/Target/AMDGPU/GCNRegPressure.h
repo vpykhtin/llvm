@@ -118,6 +118,12 @@ public:
   const decltype(LiveRegs) &getLiveRegs() const { return LiveRegs; }
   const MachineInstr *getLastTrackedMI() const { return LastTrackedMI; }
 
+  template <typename Range>
+  void addIgnoreRegs(Range &&IgnoreRegs) {
+    for (const auto &RegMask : IgnoreRegs)
+      IgnoreRegUses[RegMask.first] |= RegMask.second;
+  }
+
   GCNRegPressure getPressure() const { return CurPressure; }
   void clearMaxPressure() { MaxPressure.clear(); }
 

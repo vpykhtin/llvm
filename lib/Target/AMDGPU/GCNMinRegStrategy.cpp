@@ -289,6 +289,7 @@ class GCNMinRegScheduler2 {
 
   struct Subgraph;
   class SGScheduler;
+  class ReadyPredTracker;
   class SGRPTracker;
   class SGRPTracker2;
   struct LSUExecOrder;
@@ -645,12 +646,9 @@ void GCNMinRegScheduler2::Subgraph::rollbackMerge() {
 
 }
 
-class GCNMinRegScheduler2::SGRPTracker {
+class GCNMinRegScheduler2::ReadyPredTracker {
   GCNMinRegScheduler2 &LSUSource;
   Subgraph &SG, *MergeTo;
-
-  GCNUpwardRPTracker RPT;
-  decltype(Subgraph::List.begin()) CurLSU;
 
   DenseMap<LinkedSU*, unsigned> NumSuccs;
   unsigned NumReadyPreds = 0;
@@ -659,69 +657,36 @@ class GCNMinRegScheduler2::SGRPTracker {
     unsigned NumSuccs = 0;
     for (const auto &Succ : LSU->Succs) {
       if (Succ.isAssignedRegDep() &&
-          LSUSource.getLSU(Succ.getSUnit()).Parent == &SG)
+        LSUSource.getLSU(Succ.getSUnit()).Parent == &SG)
         ++NumSuccs;
     }
     return NumSuccs;
   }
 
-  void stripDataPreds(LinkedSU &LSU) {
-    for (const auto &Pred : LSU->Preds) {
-      auto &PredLSU = LSUSource.getLSU(Pred.getSUnit());
-      if (Pred.isWeak() || PredLSU->isBoundaryNode() || PredLSU.Parent == &SG)
-        continue;
-
-      if (PredLSU.Parent == MergeTo) {
-        auto R = NumSuccs.try_emplace(&PredLSU, 0);
-        auto &N = R.first->second;
-        if (R.second) // inserted for the first time
-          N = getNumSuccs(PredLSU);
-
-        if (--N == 0)
-          ++NumReadyPreds;
-        else
-          continue;
-      }
-      RPT.recedeDefsOnly(*PredLSU->getInstr());
-    }
-  }
-
 public:
-  SGRPTracker(GCNMinRegScheduler2 &LSUSource_,
-              Subgraph &SG_,
-              Subgraph *MergeTo_ = nullptr)
+  ReadyPredTracker(GCNMinRegScheduler2 &LSUSource_,
+                   Subgraph &SG_,
+                   Subgraph *MergeTo_ = nullptr)
     : LSUSource(LSUSource_)
     , SG(SG_)
     , MergeTo(MergeTo_)
-    , RPT(LSUSource_.LIS)
   {}
-  
-  GCNRegPressure getPressure() const { return RPT.getPressure(); }
 
-  LinkedSU& getCur() const { return *CurLSU; }
+  void recede(LinkedSU &LSU) {
+    for (const auto &Pred : LSU->Preds) {
+      auto &PredLSU = LSUSource.getLSU(Pred.getSUnit());
+      if (Pred.isWeak() || PredLSU->isBoundaryNode() ||
+          PredLSU.Parent != MergeTo)
+        continue;
 
-  bool done() const { return CurLSU == SG.List.end(); }
+      auto R = NumSuccs.try_emplace(&PredLSU, 0);
+      auto &N = R.first->second;
+      if (R.second) // inserted for the first time
+        N = getNumSuccs(PredLSU);
 
-  void reset() {
-    CurLSU = SG.List.begin();
-    RPT.reset(*(*CurLSU)->getInstr(), &SG.LiveOutRegs);
-  }
-
-  void recede() {
-    assert(!done());
-    RPT.recede(*(*CurLSU)->getInstr());
-    stripDataPreds(*CurLSU);
-    ++CurLSU;
-  }
-
-  GCNRegPressure getPendingPredsStrippedPressure() const {
-    GCNUpwardRPTracker TempRPT(LSUSource.LIS);
-    auto LR = RPT.getLiveRegs() - LSUSource.LiveThrRegs;
-    TempRPT.reset(*(*CurLSU)->getInstr(), &LR);
-    for (const auto &P : NumSuccs)
-      if (P.second > 0)
-        TempRPT.recedeDefsOnly(*(*P.first)->getInstr());
-    return TempRPT.getPressure();
+      if (--N == 0)
+        ++NumReadyPreds;
+    }
   }
 
   bool hasReadyPreds() const { return NumReadyPreds != 0; }
@@ -747,39 +712,66 @@ public:
   }
 };
 
-
-class GCNMinRegScheduler2::SGRPTracker2 {
+class GCNMinRegScheduler2::SGRPTracker {
   GCNMinRegScheduler2 &LSUSource;
-  Subgraph &SG, *MergeTo;
-  unsigned NumRegs = 0;
-
+  Subgraph &SG;
   decltype(Subgraph::List.begin()) CurLSU;
 
-  DenseMap<LinkedSU*, unsigned> NumSuccs;
-  unsigned NumReadyPreds = 0;
+  GCNUpwardRPTracker RPT;
 
-  unsigned getNumSuccs(const LinkedSU &LSU) const {
-    unsigned NumSuccs = 0;
-    for (const auto &Succ : LSU->Succs) {
-      if (Succ.isAssignedRegDep() &&
-        LSUSource.getLSU(Succ.getSUnit()).Parent == &SG)
-        ++NumSuccs;
+  void stripDataPreds(LinkedSU &LSU) {
+    for (const auto &Pred : LSU->Preds) {
+      if (!Pred.isAssignedRegDep())
+        continue;
+      auto &PredLSU = LSUSource.getLSU(Pred.getSUnit());
+      if (PredLSU.Parent != &SG)
+        RPT.recedeDefsOnly(*PredLSU->getInstr());
     }
-    return NumSuccs;
   }
 
 public:
-  SGRPTracker2(GCNMinRegScheduler2 &LSUSource_,
-    Subgraph &SG_,
-    Subgraph *MergeTo_ = nullptr)
+  SGRPTracker(GCNMinRegScheduler2 &LSUSource_,
+              Subgraph &SG_)
     : LSUSource(LSUSource_)
     , SG(SG_)
-    , MergeTo(MergeTo_)
+    , RPT(LSUSource_.LIS) {
+    RPT.addIgnoreRegs(LSUSource.LiveThrRegs);
+  }
+
+  GCNRegPressure getPressure() const { return RPT.getPressure(); }
+
+  LinkedSU& getCur() const { return *CurLSU; }
+
+  bool done() const { return CurLSU == SG.List.end(); }
+
+  void reset() {
+    CurLSU = SG.List.begin();
+    RPT.reset(*(*CurLSU)->getInstr(), &SG.LiveOutRegs);
+  }
+
+  void recede() {
+    assert(!done());
+    RPT.recede(*(*CurLSU)->getInstr());
+    stripDataPreds(*CurLSU);
+    ++CurLSU;
+  }
+};
+
+
+class GCNMinRegScheduler2::SGRPTracker2 {
+  GCNMinRegScheduler2 &LSUSource;
+  Subgraph &SG;
+  decltype(Subgraph::List.begin()) CurLSU;
+  unsigned NumRegs = 0;
+
+public:
+  SGRPTracker2(GCNMinRegScheduler2 &LSUSource_,
+               Subgraph &SG_)
+    : LSUSource(LSUSource_)
+    , SG(SG_)
   {}
 
   unsigned getPressure() const { return NumRegs; }
-
-  unsigned getPendingPredsStrippedPressure() const { return getPressure(); }
 
   LinkedSU& getCur() const { return *CurLSU; }
 
@@ -799,15 +791,6 @@ public:
       auto &PredLSU = LSUSource.getLSU(Pred.getSUnit());
       if (PredLSU.Parent == &SG)
         ++NumRegs;
-      else if (PredLSU.Parent == MergeTo) {
-        auto R = NumSuccs.try_emplace(&PredLSU, 0);
-        auto &N = R.first->second;
-        if (R.second) // inserted for the first time
-          N = getNumSuccs(PredLSU);
-
-        if (--N == 0)
-          ++NumReadyPreds;
-      }
     }
 
     if (++CurLSU == SG.List.end())
@@ -820,28 +803,6 @@ public:
       if (SuccLSU.Parent == &SG)
         --NumRegs;
     }
-  }
-
-  bool hasReadyPreds() const { return NumReadyPreds != 0; }
-
-  void clearReadyPreds() {
-    for (auto I = NumSuccs.begin(), E = NumSuccs.end(); I != E;) {
-      auto X = I++;
-      if (0 == X->second)
-        NumSuccs.erase(X);
-    }
-    NumReadyPreds = 0;
-  }
-
-  LinkedSU* getLowestPred() const {
-    LinkedSU* PredLSU = nullptr;
-    auto Lowest = std::numeric_limits<unsigned>::max();
-    for (const auto &P : NumSuccs)
-      if (P.first->SGOrderIndex < Lowest) {
-        Lowest = P.first->SGOrderIndex;
-        PredLSU = P.first;
-      };
-    return PredLSU;
   }
 };
 
@@ -862,17 +823,19 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
                                               GCNMinRegScheduler2 &LSUSource) {
   std::map<LinkedSU*, LSURange, LSUExecOrder> Chunks;
 
-  SGRPTracker RPT(LSUSource, *this, MergeTo);
+  ReadyPredTracker PredsT(LSUSource, *this, MergeTo);
+  SGRPTracker RPT(LSUSource, *this);
   RPT.reset();
   auto OutRP = RPT.getPressure();
   do {
-    RPT.clearReadyPreds();
+    PredsT.clearReadyPreds();
 
     auto Begin = RPT.getCur().getIterator();
     while (!RPT.done() &&
-      (!RPT.hasReadyPreds() ||
-        RPT.getPendingPredsStrippedPressure() != OutRP))
+      (!PredsT.hasReadyPreds() || RPT.getPressure() != OutRP)) {
+      PredsT.recede(RPT.getCur());
       RPT.recede();
+    }
     auto End = RPT.getCur().getIterator();
 
     // Normally every found chunk should depend on the earlier LSU (by exec
@@ -883,7 +846,7 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
     // we should join every previously found chunks to be dependent on the
     // later one. This makes the schedule worse but valid.
     auto R = make_range(Begin, std::prev(End));
-    auto InsRes = Chunks.emplace(RPT.getLowestPred(), R);
+    auto InsRes = Chunks.emplace(PredsT.getLowestPred(), R);
     auto I = InsRes.first;
     auto Inserted = InsRes.second;
     if (I != Chunks.begin()) {
@@ -1279,7 +1242,7 @@ void GCNMinRegScheduler2::merge() {
     DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
 
-#if 0
+#if 1
   while (true) {
     auto Merges = getMultiTierMerges();
     if (Merges.empty())
