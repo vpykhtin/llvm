@@ -290,6 +290,7 @@ class GCNMinRegScheduler2 {
   struct Subgraph;
   class SGScheduler;
   class SGRPTracker;
+  class SGRPTracker2;
   struct LSUExecOrder;
 
   struct LinkedSU : ilist_node<LinkedSU> {
@@ -721,6 +722,104 @@ public:
       if (P.second > 0)
         TempRPT.recedeDefsOnly(*(*P.first)->getInstr());
     return TempRPT.getPressure();
+  }
+
+  bool hasReadyPreds() const { return NumReadyPreds != 0; }
+
+  void clearReadyPreds() {
+    for (auto I = NumSuccs.begin(), E = NumSuccs.end(); I != E;) {
+      auto X = I++;
+      if (0 == X->second)
+        NumSuccs.erase(X);
+    }
+    NumReadyPreds = 0;
+  }
+
+  LinkedSU* getLowestPred() const {
+    LinkedSU* PredLSU = nullptr;
+    auto Lowest = std::numeric_limits<unsigned>::max();
+    for (const auto &P : NumSuccs)
+      if (P.first->SGOrderIndex < Lowest) {
+        Lowest = P.first->SGOrderIndex;
+        PredLSU = P.first;
+      };
+    return PredLSU;
+  }
+};
+
+
+class GCNMinRegScheduler2::SGRPTracker2 {
+  GCNMinRegScheduler2 &LSUSource;
+  Subgraph &SG, *MergeTo;
+  unsigned NumRegs = 0;
+
+  decltype(Subgraph::List.begin()) CurLSU;
+
+  DenseMap<LinkedSU*, unsigned> NumSuccs;
+  unsigned NumReadyPreds = 0;
+
+  unsigned getNumSuccs(const LinkedSU &LSU) const {
+    unsigned NumSuccs = 0;
+    for (const auto &Succ : LSU->Succs) {
+      if (Succ.isAssignedRegDep() &&
+        LSUSource.getLSU(Succ.getSUnit()).Parent == &SG)
+        ++NumSuccs;
+    }
+    return NumSuccs;
+  }
+
+public:
+  SGRPTracker2(GCNMinRegScheduler2 &LSUSource_,
+    Subgraph &SG_,
+    Subgraph *MergeTo_ = nullptr)
+    : LSUSource(LSUSource_)
+    , SG(SG_)
+    , MergeTo(MergeTo_)
+  {}
+
+  unsigned getPressure() const { return NumRegs; }
+
+  unsigned getPendingPredsStrippedPressure() const { return getPressure(); }
+
+  LinkedSU& getCur() const { return *CurLSU; }
+
+  bool done() const { return CurLSU == SG.List.end(); }
+
+  void reset() {
+    CurLSU = SG.List.begin();
+    NumRegs = 0;
+  }
+
+  void recede() {
+    assert(!done());
+
+    for (const auto &Pred : (*CurLSU)->Preds) {
+      if (!Pred.isAssignedRegDep())
+        continue;
+      auto &PredLSU = LSUSource.getLSU(Pred.getSUnit());
+      if (PredLSU.Parent == &SG)
+        ++NumRegs;
+      else if (PredLSU.Parent == MergeTo) {
+        auto R = NumSuccs.try_emplace(&PredLSU, 0);
+        auto &N = R.first->second;
+        if (R.second) // inserted for the first time
+          N = getNumSuccs(PredLSU);
+
+        if (--N == 0)
+          ++NumReadyPreds;
+      }
+    }
+
+    if (++CurLSU == SG.List.end())
+      return;
+
+    for (const auto &Succ : (*CurLSU)->Succs) {
+      if (!Succ.isAssignedRegDep())
+        continue;
+      const auto &SuccLSU = LSUSource.getLSU(Succ.getSUnit());
+      if (SuccLSU.Parent == &SG)
+        --NumRegs;
+    }
   }
 
   bool hasReadyPreds() const { return NumReadyPreds != 0; }
@@ -1180,7 +1279,7 @@ void GCNMinRegScheduler2::merge() {
     DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
 
-#if 1
+#if 0
   while (true) {
     auto Merges = getMultiTierMerges();
     if (Merges.empty())
@@ -1399,16 +1498,8 @@ static const bool GraphScheduleMode = false;
 
 bool GCNMinRegScheduler2::isExpanded(const Subgraph &R) {
   static const DenseSet<unsigned> Expand =
-    // { 0, 1, 2, 4, 6 };
-    //{ 0, 1, 44, 45 };
-   //  { 0, 1, 2 };
-   // { 0, 1 };
-
-  //  { 0, 1 };
-  // { 0, 5, 3, 25 };
   {};
-
-  //{ 62, 63 };
+  //{ 0, 1};
 
   return Expand.count(R.ID) > 0 || (R.List.size() <= 2);
 }
