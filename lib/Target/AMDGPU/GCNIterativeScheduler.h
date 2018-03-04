@@ -165,7 +165,7 @@ protected:
   void printRegions(raw_ostream &OS) const;
   void printSchedResult(raw_ostream &OS,
                         const Region *R,
-                        const GCNRegPressure &RP) const;
+                        const GCNRegPressure &RPBefore) const;
   void printSchedRP(raw_ostream &OS,
                     const GCNRegPressure &Before,
                     const GCNRegPressure &After) const;
