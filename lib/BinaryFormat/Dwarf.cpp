@@ -681,3 +681,8 @@ uint32_t llvm::dwarf::djbHash(StringRef Buffer, uint32_t H) {
     H = ((H << 5) + H) + C;
   return H;
 }
+
+constexpr char llvm::dwarf::EnumTraits<Attribute>::Type[];
+constexpr char llvm::dwarf::EnumTraits<Form>::Type[];
+constexpr char llvm::dwarf::EnumTraits<Index>::Type[];
+constexpr char llvm::dwarf::EnumTraits<Tag>::Type[];
