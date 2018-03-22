@@ -112,7 +112,13 @@ private:
   static bool offsetsCanBeCombined(CombineInfo &CI);
 
   bool findMatchingInst(CombineInfo &CI);
+
+  unsigned read2Opcode(unsigned EltSize) const;
+  unsigned read2ST64Opcode(unsigned EltSize) const;
   MachineBasicBlock::iterator mergeRead2Pair(CombineInfo &CI);
+
+  unsigned write2Opcode(unsigned EltSize) const;
+  unsigned write2ST64Opcode(unsigned EltSize) const;
   MachineBasicBlock::iterator mergeWrite2Pair(CombineInfo &CI);
   MachineBasicBlock::iterator mergeSBufferLoadImmPair(CombineInfo &CI);
   MachineBasicBlock::iterator mergeBufferLoadPair(CombineInfo &CI);
@@ -131,7 +137,7 @@ public:
 
   bool runOnMachineFunction(MachineFunction &MF) override;
 
-  StringRef getPassName() const override { return "SI Load / Store Optimizer"; }
+  StringRef getPassName() const override { return "SI Load Store Optimizer"; }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
@@ -144,10 +150,10 @@ public:
 } // end anonymous namespace.
 
 INITIALIZE_PASS_BEGIN(SILoadStoreOptimizer, DEBUG_TYPE,
-                      "SI Load / Store Optimizer", false, false)
+                      "SI Load Store Optimizer", false, false)
 INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
 INITIALIZE_PASS_END(SILoadStoreOptimizer, DEBUG_TYPE,
-                    "SI Load / Store Optimizer", false, false)
+                    "SI Load Store Optimizer", false, false)
 
 char SILoadStoreOptimizer::ID = 0;
 
@@ -436,6 +442,20 @@ bool SILoadStoreOptimizer::findMatchingInst(CombineInfo &CI) {
   return false;
 }
 
+unsigned SILoadStoreOptimizer::read2Opcode(unsigned EltSize) const {
+  if (STM->ldsRequiresM0Init())
+    return (EltSize == 4) ? AMDGPU::DS_READ2_B32 : AMDGPU::DS_READ2_B64;
+  return (EltSize == 4) ? AMDGPU::DS_READ2_B32_gfx9 : AMDGPU::DS_READ2_B64_gfx9;
+}
+
+unsigned SILoadStoreOptimizer::read2ST64Opcode(unsigned EltSize) const {
+  if (STM->ldsRequiresM0Init())
+    return (EltSize == 4) ? AMDGPU::DS_READ2ST64_B32 : AMDGPU::DS_READ2ST64_B64;
+
+  return (EltSize == 4) ?
+    AMDGPU::DS_READ2ST64_B32_gfx9 : AMDGPU::DS_READ2ST64_B64_gfx9;
+}
+
 MachineBasicBlock::iterator  SILoadStoreOptimizer::mergeRead2Pair(
   CombineInfo &CI) {
   MachineBasicBlock *MBB = CI.I->getParent();
@@ -449,12 +469,8 @@ MachineBasicBlock::iterator  SILoadStoreOptimizer::mergeRead2Pair(
 
   unsigned NewOffset0 = CI.Offset0;
   unsigned NewOffset1 = CI.Offset1;
-  unsigned Opc = (CI.EltSize == 4) ? AMDGPU::DS_READ2_B32
-                                   : AMDGPU::DS_READ2_B64;
-
-  if (CI.UseST64)
-    Opc = (CI.EltSize == 4) ? AMDGPU::DS_READ2ST64_B32
-                            : AMDGPU::DS_READ2ST64_B64;
+  unsigned Opc = CI.UseST64 ?
+    read2ST64Opcode(CI.EltSize) : read2Opcode(CI.EltSize);
 
   unsigned SubRegIdx0 = (CI.EltSize == 4) ? AMDGPU::sub0 : AMDGPU::sub0_sub1;
   unsigned SubRegIdx1 = (CI.EltSize == 4) ? AMDGPU::sub1 : AMDGPU::sub2_sub3;
@@ -480,11 +496,16 @@ MachineBasicBlock::iterator  SILoadStoreOptimizer::mergeRead2Pair(
   unsigned BaseReg = AddrReg->getReg();
   unsigned BaseRegFlags = 0;
   if (CI.BaseOff) {
+    unsigned ImmReg = MRI->createVirtualRegister(&AMDGPU::SGPR_32RegClass);
+    BuildMI(*MBB, CI.Paired, DL, TII->get(AMDGPU::S_MOV_B32), ImmReg)
+      .addImm(CI.BaseOff);
+
     BaseReg = MRI->createVirtualRegister(&AMDGPU::VGPR_32RegClass);
     BaseRegFlags = RegState::Kill;
-    BuildMI(*MBB, CI.Paired, DL, TII->get(AMDGPU::V_ADD_I32_e32), BaseReg)
-           .addImm(CI.BaseOff)
-           .addReg(AddrReg->getReg());
+
+    TII->getAddNoCarry(*MBB, CI.Paired, DL, BaseReg)
+      .addReg(ImmReg)
+      .addReg(AddrReg->getReg());
   }
 
   MachineInstrBuilder Read2 =
@@ -517,25 +538,35 @@ MachineBasicBlock::iterator  SILoadStoreOptimizer::mergeRead2Pair(
   return Next;
 }
 
+unsigned SILoadStoreOptimizer::write2Opcode(unsigned EltSize) const {
+  if (STM->ldsRequiresM0Init())
+    return (EltSize == 4) ? AMDGPU::DS_WRITE2_B32 : AMDGPU::DS_WRITE2_B64;
+  return (EltSize == 4) ? AMDGPU::DS_WRITE2_B32_gfx9 : AMDGPU::DS_WRITE2_B64_gfx9;
+}
+
+unsigned SILoadStoreOptimizer::write2ST64Opcode(unsigned EltSize) const {
+  if (STM->ldsRequiresM0Init())
+    return (EltSize == 4) ? AMDGPU::DS_WRITE2ST64_B32 : AMDGPU::DS_WRITE2ST64_B64;
+
+  return (EltSize == 4) ?
+    AMDGPU::DS_WRITE2ST64_B32_gfx9 : AMDGPU::DS_WRITE2ST64_B64_gfx9;
+}
+
 MachineBasicBlock::iterator SILoadStoreOptimizer::mergeWrite2Pair(
   CombineInfo &CI) {
   MachineBasicBlock *MBB = CI.I->getParent();
 
   // Be sure to use .addOperand(), and not .addReg() with these. We want to be
   // sure we preserve the subregister index and any register flags set on them.
-  const MachineOperand *Addr = TII->getNamedOperand(*CI.I, AMDGPU::OpName::addr);
+  const MachineOperand *AddrReg = TII->getNamedOperand(*CI.I, AMDGPU::OpName::addr);
   const MachineOperand *Data0 = TII->getNamedOperand(*CI.I, AMDGPU::OpName::data0);
   const MachineOperand *Data1
     = TII->getNamedOperand(*CI.Paired, AMDGPU::OpName::data0);
 
   unsigned NewOffset0 = CI.Offset0;
   unsigned NewOffset1 = CI.Offset1;
-  unsigned Opc = (CI.EltSize == 4) ? AMDGPU::DS_WRITE2_B32
-                                   : AMDGPU::DS_WRITE2_B64;
-
-  if (CI.UseST64)
-    Opc = (CI.EltSize == 4) ? AMDGPU::DS_WRITE2ST64_B32
-                            : AMDGPU::DS_WRITE2ST64_B64;
+  unsigned Opc = CI.UseST64 ?
+    write2ST64Opcode(CI.EltSize) : write2Opcode(CI.EltSize);
 
   if (NewOffset0 > NewOffset1) {
     // Canonicalize the merged instruction so the smaller offset comes first.
@@ -550,14 +581,19 @@ MachineBasicBlock::iterator SILoadStoreOptimizer::mergeWrite2Pair(
   const MCInstrDesc &Write2Desc = TII->get(Opc);
   DebugLoc DL = CI.I->getDebugLoc();
 
-  unsigned BaseReg = Addr->getReg();
+  unsigned BaseReg = AddrReg->getReg();
   unsigned BaseRegFlags = 0;
   if (CI.BaseOff) {
+    unsigned ImmReg = MRI->createVirtualRegister(&AMDGPU::SGPR_32RegClass);
+    BuildMI(*MBB, CI.Paired, DL, TII->get(AMDGPU::S_MOV_B32), ImmReg)
+      .addImm(CI.BaseOff);
+
     BaseReg = MRI->createVirtualRegister(&AMDGPU::VGPR_32RegClass);
     BaseRegFlags = RegState::Kill;
-    BuildMI(*MBB, CI.Paired, DL, TII->get(AMDGPU::V_ADD_I32_e32), BaseReg)
-           .addImm(CI.BaseOff)
-           .addReg(Addr->getReg());
+
+    TII->getAddNoCarry(*MBB, CI.Paired, DL, BaseReg)
+      .addReg(ImmReg)
+      .addReg(AddrReg->getReg());
   }
 
   MachineInstrBuilder Write2 =
@@ -786,9 +822,13 @@ bool SILoadStoreOptimizer::optimizeBlock(MachineBasicBlock &MBB) {
     CombineInfo CI;
     CI.I = I;
     unsigned Opc = MI.getOpcode();
-    if (Opc == AMDGPU::DS_READ_B32 || Opc == AMDGPU::DS_READ_B64) {
+    if (Opc == AMDGPU::DS_READ_B32 || Opc == AMDGPU::DS_READ_B64 ||
+        Opc == AMDGPU::DS_READ_B32_gfx9 || Opc == AMDGPU::DS_READ_B64_gfx9) {
+
       CI.InstClass = DS_READ_WRITE;
-      CI.EltSize = (Opc == AMDGPU::DS_READ_B64) ? 8 : 4;
+      CI.EltSize =
+        (Opc == AMDGPU::DS_READ_B64 || Opc == AMDGPU::DS_READ_B64_gfx9) ? 8 : 4;
+
       if (findMatchingInst(CI)) {
         Modified = true;
         I = mergeRead2Pair(CI);
@@ -797,10 +837,13 @@ bool SILoadStoreOptimizer::optimizeBlock(MachineBasicBlock &MBB) {
       }
 
       continue;
-    }
-    if (Opc == AMDGPU::DS_WRITE_B32 || Opc == AMDGPU::DS_WRITE_B64) {
+    } else if (Opc == AMDGPU::DS_WRITE_B32 || Opc == AMDGPU::DS_WRITE_B64 ||
+               Opc == AMDGPU::DS_WRITE_B32_gfx9 ||
+               Opc == AMDGPU::DS_WRITE_B64_gfx9) {
       CI.InstClass = DS_READ_WRITE;
-      CI.EltSize = (Opc == AMDGPU::DS_WRITE_B64) ? 8 : 4;
+      CI.EltSize
+        = (Opc == AMDGPU::DS_WRITE_B64 || Opc == AMDGPU::DS_WRITE_B64_gfx9) ? 8 : 4;
+
       if (findMatchingInst(CI)) {
         Modified = true;
         I = mergeWrite2Pair(CI);
@@ -874,7 +917,7 @@ bool SILoadStoreOptimizer::optimizeBlock(MachineBasicBlock &MBB) {
 }
 
 bool SILoadStoreOptimizer::runOnMachineFunction(MachineFunction &MF) {
-  if (skipFunction(*MF.getFunction()))
+  if (skipFunction(MF.getFunction()))
     return false;
 
   STM = &MF.getSubtarget<SISubtarget>();

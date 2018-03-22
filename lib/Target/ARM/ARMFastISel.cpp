@@ -1416,7 +1416,7 @@ bool ARMFastISel::ARMEmitCmp(const Value *Src1Value, const Value *Src2Value,
     case MVT::i8:
     case MVT::i16:
       needsExt = true;
-    // Intentional fall-through.
+      LLVM_FALLTHROUGH;
     case MVT::i32:
       if (isThumb2) {
         if (!UseImm)
@@ -2352,8 +2352,8 @@ bool ARMFastISel::SelectCall(const Instruction *I,
   for (ImmutableCallSite::arg_iterator i = CS.arg_begin(), e = CS.arg_end();
        i != e; ++i) {
     // If we're lowering a memory intrinsic instead of a regular call, skip the
-    // last two arguments, which shouldn't be passed to the underlying function.
-    if (IntrMemName && e-i <= 2)
+    // last argument, which shouldn't be passed to the underlying function.
+    if (IntrMemName && e - i <= 1)
       break;
 
     ISD::ArgFlagsTy Flags;
@@ -2958,7 +2958,7 @@ unsigned ARMFastISel::ARMLowerPICELF(const GlobalValue *GV,
                                      unsigned Align, MVT VT) {
   bool UseGOT_PREL = !TM.shouldAssumeDSOLocal(*GV->getParent(), GV);
 
-  LLVMContext *Context = &MF->getFunction()->getContext();
+  LLVMContext *Context = &MF->getFunction().getContext();
   unsigned ARMPCLabelIndex = AFI->createPICLabelUId();
   unsigned PCAdj = Subtarget->isThumb() ? 4 : 8;
   ARMConstantPoolValue *CPV = ARMConstantPoolConstant::Create(

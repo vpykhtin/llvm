@@ -21,13 +21,9 @@
 #include "AArch64CallLowering.h"
 #include "AArch64LegalizerInfo.h"
 #include "AArch64RegisterBankInfo.h"
-#include "llvm/CodeGen/GlobalISel/IRTranslator.h"
 #include "llvm/CodeGen/GlobalISel/InstructionSelect.h"
-#include "llvm/CodeGen/GlobalISel/Legalizer.h"
-#include "llvm/CodeGen/GlobalISel/RegBankSelect.h"
 #include "llvm/CodeGen/MachineScheduler.h"
 #include "llvm/IR/GlobalValue.h"
-#include "llvm/Support/TargetRegistry.h"
 
 using namespace llvm;
 
@@ -154,7 +150,7 @@ AArch64Subtarget::AArch64Subtarget(const Triple &TT, const std::string &CPU,
       InstrInfo(initializeSubtargetDependencies(FS, CPU)), TSInfo(),
       TLInfo(TM, *this) {
   CallLoweringInfo.reset(new AArch64CallLowering(*getTargetLowering()));
-  Legalizer.reset(new AArch64LegalizerInfo());
+  Legalizer.reset(new AArch64LegalizerInfo(*this));
 
   auto *RBI = new AArch64RegisterBankInfo(*getRegisterInfo());
 
@@ -221,19 +217,6 @@ unsigned char AArch64Subtarget::classifyGlobalFunctionReference(
   return AArch64II::MO_NO_FLAG;
 }
 
-/// This function returns the name of a function which has an interface
-/// like the non-standard bzero function, if such a function exists on
-/// the current subtarget and it is considered prefereable over
-/// memset with zero passed as the second argument. Otherwise it
-/// returns null.
-const char *AArch64Subtarget::getBZeroEntry() const {
-  // Prefer bzero on Darwin only.
-  if(isTargetDarwin())
-    return "bzero";
-
-  return nullptr;
-}
-
 void AArch64Subtarget::overrideSchedPolicy(MachineSchedPolicy &Policy,
                                            unsigned NumRegionInstrs) const {
   // LNT run (at least on Cyclone) showed reasonably significant gains for
@@ -266,4 +249,14 @@ bool AArch64Subtarget::supportsAddressTopByteIgnored() const {
 std::unique_ptr<PBQPRAConstraint>
 AArch64Subtarget::getCustomPBQPConstraints() const {
   return balanceFPOps() ? llvm::make_unique<A57ChainingConstraint>() : nullptr;
+}
+
+void AArch64Subtarget::mirFileLoaded(MachineFunction &MF) const {
+  // We usually compute max call frame size after ISel. Do the computation now
+  // if the .mir file didn't specify it. Note that this will probably give you
+  // bogus values after PEI has eliminated the callframe setup/destroy pseudo
+  // instructions, specify explicitely if you need it to be correct.
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  if (!MFI.isMaxCallFrameSizeComputed())
+    MFI.computeMaxCallFrameSize(MF);
 }

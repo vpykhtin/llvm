@@ -248,6 +248,9 @@ bool ShrinkWrap::useOrDefCSROrFI(const MachineInstr &MI,
   for (const MachineOperand &MO : MI.operands()) {
     bool UseOrDefCSR = false;
     if (MO.isReg()) {
+      // Ignore instructions like DBG_VALUE which don't read/def the register.
+      if (!MO.isDef() && !MO.readsReg())
+        continue;
       unsigned PhysReg = MO.getReg();
       if (!PhysReg)
         continue;
@@ -263,7 +266,8 @@ bool ShrinkWrap::useOrDefCSROrFI(const MachineInstr &MI,
         }
       }
     }
-    if (UseOrDefCSR || MO.isFI()) {
+    // Skip FrameIndex operands in DBG_VALUE instructions.
+    if (UseOrDefCSR || (MO.isFI() && !MI.isDebugValue())) {
       DEBUG(dbgs() << "Use or define CSR(" << UseOrDefCSR << ") or FI("
                    << MO.isFI() << "): " << MI << '\n');
       return true;
@@ -445,7 +449,7 @@ static bool isIrreducibleCFG(const MachineFunction &MF,
 }
 
 bool ShrinkWrap::runOnMachineFunction(MachineFunction &MF) {
-  if (skipFunction(*MF.getFunction()) || MF.empty() || !isShrinkWrapEnabled(MF))
+  if (skipFunction(MF.getFunction()) || MF.empty() || !isShrinkWrapEnabled(MF))
     return false;
 
   DEBUG(dbgs() << "**** Analysing " << MF.getName() << '\n');
@@ -558,16 +562,17 @@ bool ShrinkWrap::isShrinkWrapEnabled(const MachineFunction &MF) {
   switch (EnableShrinkWrapOpt) {
   case cl::BOU_UNSET:
     return TFI->enableShrinkWrapping(MF) &&
-      // Windows with CFI has some limitations that make it impossible
-      // to use shrink-wrapping.
-      !MF.getTarget().getMCAsmInfo()->usesWindowsCFI() &&
-      // Sanitizers look at the value of the stack at the location
-      // of the crash. Since a crash can happen anywhere, the
-      // frame must be lowered before anything else happen for the
-      // sanitizers to be able to get a correct stack frame.
-      !(MF.getFunction()->hasFnAttribute(Attribute::SanitizeAddress) ||
-        MF.getFunction()->hasFnAttribute(Attribute::SanitizeThread) ||
-        MF.getFunction()->hasFnAttribute(Attribute::SanitizeMemory));
+           // Windows with CFI has some limitations that make it impossible
+           // to use shrink-wrapping.
+           !MF.getTarget().getMCAsmInfo()->usesWindowsCFI() &&
+           // Sanitizers look at the value of the stack at the location
+           // of the crash. Since a crash can happen anywhere, the
+           // frame must be lowered before anything else happen for the
+           // sanitizers to be able to get a correct stack frame.
+           !(MF.getFunction().hasFnAttribute(Attribute::SanitizeAddress) ||
+             MF.getFunction().hasFnAttribute(Attribute::SanitizeThread) ||
+             MF.getFunction().hasFnAttribute(Attribute::SanitizeMemory) ||
+             MF.getFunction().hasFnAttribute(Attribute::SanitizeHWAddress));
   // If EnableShrinkWrap is set, it takes precedence on whatever the
   // target sets. The rational is that we assume we want to test
   // something related to shrink-wrapping.

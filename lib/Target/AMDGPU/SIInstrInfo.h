@@ -76,6 +76,9 @@ public:
 private:
   void swapOperands(MachineInstr &Inst) const;
 
+  bool moveScalarAddSub(SetVectorType &Worklist,
+                        MachineInstr &Inst) const;
+
   void lowerScalarAbs(SetVectorType &Worklist,
                       MachineInstr &Inst) const;
 
@@ -453,6 +456,14 @@ public:
     return get(Opcode).TSFlags & SIInstrFlags::Gather4;
   }
 
+  static bool isD16(const MachineInstr &MI) {
+    return MI.getDesc().TSFlags & SIInstrFlags::D16;
+  }
+
+  bool isD16(uint16_t Opcode) const {
+    return get(Opcode).TSFlags & SIInstrFlags::D16;
+  }
+
   static bool isFLAT(const MachineInstr &MI) {
     return MI.getDesc().TSFlags & SIInstrFlags::FLAT;
   }
@@ -691,9 +702,7 @@ public:
   bool verifyInstruction(const MachineInstr &MI,
                          StringRef &ErrInfo) const override;
 
-  static unsigned getVALUOp(const MachineInstr &MI);
-
-  bool isSALUOpSupportedOnVALU(const MachineInstr &MI) const;
+  unsigned getVALUOp(const MachineInstr &MI) const;
 
   /// \brief Return the correct register class for \p OpNo.  For target-specific
   /// instructions, this will return the register class that has been defined

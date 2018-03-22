@@ -30,6 +30,7 @@
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -2678,8 +2679,7 @@ private:
       assert(!IsSplit);
       assert(NewBeginOffset == BeginOffset);
       II.setDest(getNewAllocaSlicePtr(IRB, OldPtr->getType()));
-      Type *CstTy = II.getAlignmentCst()->getType();
-      II.setAlignment(ConstantInt::get(CstTy, getSliceAlign()));
+      II.setAlignment(getSliceAlign());
 
       deleteIfTriviallyDead(OldPtr);
       return false;
@@ -2801,9 +2801,7 @@ private:
         II.setSource(AdjustedPtr);
 
       if (II.getAlignment() > SliceAlign) {
-        Type *CstTy = II.getAlignmentCst()->getType();
-        II.setAlignment(
-            ConstantInt::get(CstTy, MinAlign(II.getAlignment(), SliceAlign)));
+        II.setAlignment(MinAlign(II.getAlignment(), SliceAlign));
       }
 
       DEBUG(dbgs() << "          to: " << II << "\n");
@@ -3928,10 +3926,10 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
   // exact same type as the original, and with the same access offsets. In that
   // case, re-use the existing alloca, but still run through the rewriter to
   // perform phi and select speculation.
+  // P.beginOffset() can be non-zero even with the same type in a case with
+  // out-of-bounds access (e.g. @PR35657 function in SROA/basictest.ll).
   AllocaInst *NewAI;
-  if (SliceTy == AI.getAllocatedType()) {
-    assert(P.beginOffset() == 0 &&
-           "Non-zero begin offset but same alloca type");
+  if (SliceTy == AI.getAllocatedType() && P.beginOffset() == 0) {
     NewAI = &AI;
     // FIXME: We should be able to bail at this point with "nothing changed".
     // FIXME: We might want to defer PHI speculation until after here.
@@ -4047,27 +4045,58 @@ bool SROA::splitAlloca(AllocaInst &AI, AllocaSlices &AS) {
   // First try to pre-split loads and stores.
   Changed |= presplitLoadsAndStores(AI, AS);
 
-  // Now that we have identified any pre-splitting opportunities, mark any
-  // splittable (non-whole-alloca) loads and stores as unsplittable. If we fail
-  // to split these during pre-splitting, we want to force them to be
-  // rewritten into a partition.
+  // Now that we have identified any pre-splitting opportunities,
+  // mark loads and stores unsplittable except for the following case.
+  // We leave a slice splittable if all other slices are disjoint or fully
+  // included in the slice, such as whole-alloca loads and stores.
+  // If we fail to split these during pre-splitting, we want to force them
+  // to be rewritten into a partition.
   bool IsSorted = true;
-  for (Slice &S : AS) {
-    if (!S.isSplittable())
-      continue;
-    // FIXME: We currently leave whole-alloca splittable loads and stores. This
-    // used to be the only splittable loads and stores and we need to be
-    // confident that the above handling of splittable loads and stores is
-    // completely sufficient before we forcibly disable the remaining handling.
-    if (S.beginOffset() == 0 &&
-        S.endOffset() >= DL.getTypeAllocSize(AI.getAllocatedType()))
-      continue;
-    if (isa<LoadInst>(S.getUse()->getUser()) ||
-        isa<StoreInst>(S.getUse()->getUser())) {
-      S.makeUnsplittable();
-      IsSorted = false;
+
+  uint64_t AllocaSize = DL.getTypeAllocSize(AI.getAllocatedType());
+  const uint64_t MaxBitVectorSize = 1024;
+  if (AllocaSize <= MaxBitVectorSize) {
+    // If a byte boundary is included in any load or store, a slice starting or
+    // ending at the boundary is not splittable.
+    SmallBitVector SplittableOffset(AllocaSize + 1, true);
+    for (Slice &S : AS)
+      for (unsigned O = S.beginOffset() + 1;
+           O < S.endOffset() && O < AllocaSize; O++)
+        SplittableOffset.reset(O);
+
+    for (Slice &S : AS) {
+      if (!S.isSplittable())
+        continue;
+
+      if ((S.beginOffset() > AllocaSize || SplittableOffset[S.beginOffset()]) &&
+          (S.endOffset() > AllocaSize || SplittableOffset[S.endOffset()]))
+        continue;
+
+      if (isa<LoadInst>(S.getUse()->getUser()) ||
+          isa<StoreInst>(S.getUse()->getUser())) {
+        S.makeUnsplittable();
+        IsSorted = false;
+      }
     }
   }
+  else {
+    // We only allow whole-alloca splittable loads and stores
+    // for a large alloca to avoid creating too large BitVector.
+    for (Slice &S : AS) {
+      if (!S.isSplittable())
+        continue;
+
+      if (S.beginOffset() == 0 && S.endOffset() >= AllocaSize)
+        continue;
+
+      if (isa<LoadInst>(S.getUse()->getUser()) ||
+          isa<StoreInst>(S.getUse()->getUser())) {
+        S.makeUnsplittable();
+        IsSorted = false;
+      }
+    }
+  }
+
   if (!IsSorted)
     std::sort(AS.begin(), AS.end());
 
@@ -4134,6 +4163,15 @@ bool SROA::splitAlloca(AllocaInst &AI, AllocaSlices &AS) {
                  "new fragment is outside of original fragment");
           Start -= OrigFragment->OffsetInBits;
         }
+
+        // The alloca may be larger than the variable.
+        if (VarSize) {
+          if (Size > *VarSize)
+            Size = *VarSize;
+          if (Size == 0 || Start + Size > *VarSize)
+            continue;
+        }
+
         // Avoid creating a fragment expression that covers the entire variable.
         if (!VarSize || *VarSize != Size) {
           if (auto E =

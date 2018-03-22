@@ -5,12 +5,12 @@
 # CHECK: .debug_loc contents:
 
 # CHECK: 0x00000000:
-# CHECK-NEXT: 0x0000000000000000 - 0x0000000000000003: DW_OP_reg5 RDI
-# CHECK-NEXT: 0x0000000000000003 - 0x0000000000000004: DW_OP_reg0 RAX
+# CHECK-NEXT: [0x0000000000000000, 0x0000000000000003): DW_OP_reg5 RDI
+# CHECK-NEXT: [0x0000000000000003, 0x0000000000000004): DW_OP_reg0 RAX
 
 # CHECK: 0x00000036:
-# CHECK-NEXT: 0x0000000000000010 - 0x0000000000000013: DW_OP_reg5 RDI
-# CHECK-NEXT: 0x0000000000000013 - 0x0000000000000014: DW_OP_reg0 RAX
+# CHECK-NEXT: [0x0000000000000010, 0x0000000000000013): DW_OP_reg5 RDI
+# CHECK-NEXT: [0x0000000000000013, 0x0000000000000014): DW_OP_reg0 RAX
 
 # Source:
 #   int* foo(int* i) { return i; }
@@ -28,7 +28,7 @@ foo:                                    # @foo
 	.file	1 "test.c"
 	.loc	1 1 0                   # test.c:1:0
 	.cfi_startproc
-# BB#0:
+# %bb.0:
 	#DEBUG_VALUE: foo:i <- %RDI
 	.loc	1 2 3 prologue_end      # test.c:2:3
 	movq	%rdi, %rax
@@ -47,7 +47,7 @@ bar:                                    # @bar
 .Lfunc_begin1:
 	.loc	1 5 0                   # test.c:5:0
 	.cfi_startproc
-# BB#0:
+# %bb.0:
 	#DEBUG_VALUE: bar:i <- %RDI
 	.loc	1 6 3 prologue_end      # test.c:6:3
 	movq	%rdi, %rax

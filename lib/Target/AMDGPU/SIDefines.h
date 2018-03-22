@@ -85,7 +85,10 @@ enum : uint64_t {
   ClampHi = UINT64_C(1) << 48,
 
   // Is a packed VOP3P instruction.
-  IsPacked = UINT64_C(1) << 49
+  IsPacked = UINT64_C(1) << 49,
+
+  // "d16" bit set or not.
+  D16 = UINT64_C(1) << 50
 };
 
 // v_cmp_class_* etc. use a 10-bit mask for what operation is checked.
@@ -137,7 +140,6 @@ namespace AMDGPU {
     OPERAND_INPUT_MODS,
 
     // Operand for SDWA instructions
-    OPERAND_SDWA_SRC,
     OPERAND_SDWA_VOPC_DST,
 
     /// Operand with 32-bit immediate that uses the constant bus.
@@ -194,8 +196,10 @@ namespace EncValues { // Encoding values of enum9/8/7 operands
 enum {
   SGPR_MIN = 0,
   SGPR_MAX = 101,
-  TTMP_MIN = 112,
-  TTMP_MAX = 123,
+  TTMP_VI_MIN = 112,
+  TTMP_VI_MAX = 123,
+  TTMP_GFX9_MIN = 108,
+  TTMP_GFX9_MAX = 123,
   INLINE_INTEGER_C_MIN = 128,
   INLINE_INTEGER_C_POSITIVE_MAX = 192, // 64
   INLINE_INTEGER_C_MAX = 208,
@@ -271,8 +275,9 @@ enum Id { // HwRegCode, (6) [5:0]
   ID_GPR_ALLOC = 5,
   ID_LDS_ALLOC = 6,
   ID_IB_STS = 7,
-  ID_SYMBOLIC_LAST_ = 8,
   ID_MEM_BASES = 15,
+  ID_SYMBOLIC_FIRST_GFX9_ = ID_MEM_BASES,
+  ID_SYMBOLIC_LAST_ = 16,
   ID_SHIFT_ = 0,
   ID_WIDTH_ = 6,
   ID_MASK_ = (((1 << ID_WIDTH_) - 1) << ID_SHIFT_)
@@ -368,6 +373,8 @@ enum SDWA9EncValues{
   SRC_VGPR_MAX = 255,
   SRC_SGPR_MIN = 256,
   SRC_SGPR_MAX = 357,
+  SRC_TTMP_MIN = 364,
+  SRC_TTMP_MAX = 379,
 };
 
 } // namespace SDWA

@@ -24,7 +24,7 @@ class raw_ostream;
 /// This implements the Apple accelerator table format, a precursor of the
 /// DWARF 5 accelerator table format.
 /// TODO: Factor out a common base class for both formats.
-class DWARFAcceleratorTable {
+class AppleAcceleratorTable {
   struct Header {
     uint32_t Magic;
     uint16_t Version;
@@ -53,7 +53,7 @@ public:
   /// multiple DWARFFormValues.
   class ValueIterator : public std::iterator<std::input_iterator_tag,
                                             ArrayRef<DWARFFormValue>> {
-    const DWARFAcceleratorTable *AccelTable = nullptr;
+    const AppleAcceleratorTable *AccelTable = nullptr;
     SmallVector<DWARFFormValue, 3> AtomForms; ///< The decoded data entry.
 
     unsigned DataOffset = 0; ///< Offset into the section.
@@ -64,7 +64,7 @@ public:
     void Next();
   public:
     /// Construct a new iterator for the entries at \p DataOffset.
-    ValueIterator(const DWARFAcceleratorTable &AccelTable, unsigned DataOffset);
+    ValueIterator(const AppleAcceleratorTable &AccelTable, unsigned DataOffset);
     /// End marker.
     ValueIterator() = default;
 
@@ -86,11 +86,11 @@ public:
   };
 
 
-  DWARFAcceleratorTable(const DWARFDataExtractor &AccelSection,
+  AppleAcceleratorTable(const DWARFDataExtractor &AccelSection,
                         DataExtractor StringSection)
       : AccelSection(AccelSection), StringSection(StringSection) {}
 
-  bool extract();
+  llvm::Error extract();
   uint32_t getNumBuckets();
   uint32_t getNumHashes();
   uint32_t getSizeHdr();

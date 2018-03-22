@@ -59,7 +59,7 @@ widen_8_16(const LegalizerInfo::SizeAndActionsVec &v) {
 }
 
 static LegalizerInfo::SizeAndActionsVec
-widen_1_8_16(const LegalizerInfo::SizeAndActionsVec &v) {
+widen_1_8_16_narrowToLargest(const LegalizerInfo::SizeAndActionsVec &v) {
   assert(v.size() >= 1);
   assert(v[0].first > 17);
   LegalizerInfo::SizeAndActionsVec result = {
@@ -68,7 +68,7 @@ widen_1_8_16(const LegalizerInfo::SizeAndActionsVec &v) {
       {16, LegalizerInfo::WidenScalar}, {17, LegalizerInfo::Unsupported}};
   addAndInterleaveWithUnsupported(result, v);
   auto Largest = result.back().first;
-  result.push_back({Largest + 1, LegalizerInfo::Unsupported});
+  result.push_back({Largest + 1, LegalizerInfo::NarrowScalar});
   return result;
 }
 
@@ -126,6 +126,12 @@ ARMLegalizerInfo::ARMLegalizerInfo(const ARMSubtarget &ST) {
     setAction({Op, s32}, Legal);
   }
 
+  setAction({G_INTTOPTR, p0}, Legal);
+  setAction({G_INTTOPTR, 1, s32}, Legal);
+
+  setAction({G_PTRTOINT, s32}, Legal);
+  setAction({G_PTRTOINT, 1, p0}, Legal);
+
   for (unsigned Op : {G_ASHR, G_LSHR, G_SHL})
     setAction({Op, s32}, Legal);
 
@@ -138,8 +144,15 @@ ARMLegalizerInfo::ARMLegalizerInfo(const ARMSubtarget &ST) {
 
   setAction({G_BRCOND, s1}, Legal);
 
+  for (auto Ty : {s32, p0})
+    setAction({G_PHI, Ty}, Legal);
+  setLegalizeScalarToDifferentSizeStrategy(
+      G_PHI, 0, widenToLargerTypesUnsupportedOtherwise);
+
   setAction({G_CONSTANT, s32}, Legal);
-  setLegalizeScalarToDifferentSizeStrategy(G_CONSTANT, 0, widen_1_8_16);
+  setAction({G_CONSTANT, p0}, Legal);
+  setLegalizeScalarToDifferentSizeStrategy(G_CONSTANT, 0,
+                                           widen_1_8_16_narrowToLargest);
 
   setAction({G_ICMP, s1}, Legal);
   setLegalizeScalarToDifferentSizeStrategy(G_ICMP, 1,
@@ -148,30 +161,61 @@ ARMLegalizerInfo::ARMLegalizerInfo(const ARMSubtarget &ST) {
     setAction({G_ICMP, 1, Ty}, Legal);
 
   if (!ST.useSoftFloat() && ST.hasVFP2()) {
-    for (unsigned BinOp : {G_FADD, G_FSUB, G_FMUL, G_FDIV})
+    for (unsigned Op : {G_FADD, G_FSUB, G_FMUL, G_FDIV, G_FCONSTANT, G_FNEG})
       for (auto Ty : {s32, s64})
-        setAction({BinOp, Ty}, Legal);
+        setAction({Op, Ty}, Legal);
 
     setAction({G_LOAD, s64}, Legal);
     setAction({G_STORE, s64}, Legal);
 
+    setAction({G_PHI, s64}, Legal);
+
     setAction({G_FCMP, s1}, Legal);
     setAction({G_FCMP, 1, s32}, Legal);
     setAction({G_FCMP, 1, s64}, Legal);
+
+    setAction({G_MERGE_VALUES, s64}, Legal);
+    setAction({G_MERGE_VALUES, 1, s32}, Legal);
+    setAction({G_UNMERGE_VALUES, s32}, Legal);
+    setAction({G_UNMERGE_VALUES, 1, s64}, Legal);
+
+    setAction({G_FPEXT, s64}, Legal);
+    setAction({G_FPEXT, 1, s32}, Legal);
+
+    setAction({G_FPTRUNC, s32}, Legal);
+    setAction({G_FPTRUNC, 1, s64}, Legal);
   } else {
     for (unsigned BinOp : {G_FADD, G_FSUB, G_FMUL, G_FDIV})
       for (auto Ty : {s32, s64})
         setAction({BinOp, Ty}, Libcall);
 
+    for (auto Ty : {s32, s64}) {
+      setAction({G_FNEG, Ty}, Lower);
+      setAction({G_FCONSTANT, Ty}, Custom);
+    }
+
     setAction({G_FCMP, s1}, Legal);
     setAction({G_FCMP, 1, s32}, Custom);
     setAction({G_FCMP, 1, s64}, Custom);
+
+    setAction({G_FPEXT, s64}, Legal);
+    setAction({G_FPEXT, 1, s32}, Libcall);
+
+    setAction({G_FPTRUNC, s32}, Legal);
+    setAction({G_FPTRUNC, 1, s64}, Libcall);
 
     if (AEABI(ST))
       setFCmpLibcallsAEABI();
     else
       setFCmpLibcallsGNU();
   }
+
+  if (!ST.useSoftFloat() && ST.hasVFP4())
+    for (auto Ty : {s32, s64})
+      setAction({G_FMA, Ty}, Legal);
+  else
+    for (auto Ty : {s32, s64})
+      setAction({G_FMA, Ty}, Libcall);
 
   for (unsigned Op : {G_FREM, G_FPOW})
     for (auto Ty : {s32, s64})
@@ -293,6 +337,7 @@ bool ARMLegalizerInfo::legalizeCustom(MachineInstr &MI,
   using namespace TargetOpcode;
 
   MIRBuilder.setInstr(MI);
+  LLVMContext &Ctx = MIRBuilder.getMF().getFunction().getContext();
 
   switch (MI.getOpcode()) {
   default:
@@ -309,7 +354,6 @@ bool ARMLegalizerInfo::legalizeCustom(MachineInstr &MI,
 
     // Our divmod libcalls return a struct containing the quotient and the
     // remainder. We need to create a virtual register for it.
-    auto &Ctx = MIRBuilder.getMF().getFunction()->getContext();
     Type *ArgTy = Type::getInt32Ty(Ctx);
     StructType *RetTy = StructType::get(Ctx, {ArgTy, ArgTy}, /* Packed */ true);
     auto RetVal = MRI.createGenericVirtualRegister(
@@ -350,7 +394,6 @@ bool ARMLegalizerInfo::legalizeCustom(MachineInstr &MI,
       return true;
     }
 
-    auto &Ctx = MIRBuilder.getMF().getFunction()->getContext();
     assert((OpSize == 32 || OpSize == 64) && "Unsupported operand size");
     auto *ArgTy = OpSize == 32 ? Type::getFloatTy(Ctx) : Type::getDoubleTy(Ctx);
     auto *RetTy = Type::getInt32Ty(Ctx);
@@ -393,6 +436,14 @@ bool ARMLegalizerInfo::legalizeCustom(MachineInstr &MI,
       assert(Results.size() == 2 && "Unexpected number of results");
       MIRBuilder.buildOr(OriginalResult, Results[0], Results[1]);
     }
+    break;
+  }
+  case G_FCONSTANT: {
+    // Convert to integer constants, while preserving the binary representation.
+    auto AsInteger =
+        MI.getOperand(1).getFPImm()->getValueAPF().bitcastToAPInt();
+    MIRBuilder.buildConstant(MI.getOperand(0).getReg(),
+                             *ConstantInt::get(Ctx, AsInteger));
     break;
   }
   }

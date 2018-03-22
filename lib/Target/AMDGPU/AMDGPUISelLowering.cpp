@@ -1069,7 +1069,7 @@ SDValue AMDGPUTargetLowering::lowerUnhandledCall(CallLoweringInfo &CLI,
   SDValue Callee = CLI.Callee;
   SelectionDAG &DAG = CLI.DAG;
 
-  const Function &Fn = *DAG.getMachineFunction().getFunction();
+  const Function &Fn = DAG.getMachineFunction().getFunction();
 
   StringRef FuncName("<unknown>");
 
@@ -1097,7 +1097,7 @@ SDValue AMDGPUTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
 SDValue AMDGPUTargetLowering::LowerDYNAMIC_STACKALLOC(SDValue Op,
                                                       SelectionDAG &DAG) const {
-  const Function &Fn = *DAG.getMachineFunction().getFunction();
+  const Function &Fn = DAG.getMachineFunction().getFunction();
 
   DiagnosticInfoUnsupported NoDynamicAlloca(Fn, "unsupported dynamic alloca",
                                             SDLoc(Op).getDebugLoc());
@@ -1190,7 +1190,7 @@ SDValue AMDGPUTargetLowering::LowerGlobalAddress(AMDGPUMachineFunction* MFI,
     }
   }
 
-  const Function &Fn = *DAG.getMachineFunction().getFunction();
+  const Function &Fn = DAG.getMachineFunction().getFunction();
   DiagnosticInfoUnsupported BadInit(
       Fn, "unsupported initializer for address space", SDLoc(Op).getDebugLoc());
   DAG.getContext()->diagnose(BadInit);
@@ -1336,7 +1336,6 @@ SDValue AMDGPUTargetLowering::SplitVectorLoad(const SDValue Op,
     return scalarizeVectorLoad(Load, DAG);
 
   SDValue BasePtr = Load->getBasePtr();
-  EVT PtrVT = BasePtr.getValueType();
   EVT MemVT = Load->getMemoryVT();
   SDLoc SL(Op);
 
@@ -1357,8 +1356,7 @@ SDValue AMDGPUTargetLowering::SplitVectorLoad(const SDValue Op,
   SDValue LoLoad = DAG.getExtLoad(Load->getExtensionType(), SL, LoVT,
                                   Load->getChain(), BasePtr, SrcValue, LoMemVT,
                                   BaseAlign, Load->getMemOperand()->getFlags());
-  SDValue HiPtr = DAG.getNode(ISD::ADD, SL, PtrVT, BasePtr,
-                              DAG.getConstant(Size, SL, PtrVT));
+  SDValue HiPtr = DAG.getObjectPtrOffset(SL, BasePtr, Size);
   SDValue HiLoad =
       DAG.getExtLoad(Load->getExtensionType(), SL, HiVT, Load->getChain(),
                      HiPtr, SrcValue.getWithOffset(LoMemVT.getStoreSize()),
@@ -1397,10 +1395,7 @@ SDValue AMDGPUTargetLowering::SplitVectorStore(SDValue Op,
   std::tie(LoMemVT, HiMemVT) = DAG.GetSplitDestVTs(MemVT);
   std::tie(Lo, Hi) = DAG.SplitVector(Val, SL, LoVT, HiVT);
 
-  EVT PtrVT = BasePtr.getValueType();
-  SDValue HiPtr = DAG.getNode(ISD::ADD, SL, PtrVT, BasePtr,
-                              DAG.getConstant(LoMemVT.getStoreSize(), SL,
-                                              PtrVT));
+  SDValue HiPtr = DAG.getObjectPtrOffset(SL, BasePtr, LoMemVT.getStoreSize());
 
   const MachinePointerInfo &SrcValue = Store->getMemOperand()->getPointerInfo();
   unsigned BaseAlign = Store->getAlignment();
@@ -3842,9 +3837,8 @@ SDValue AMDGPUTargetLowering::storeStackInputValue(SelectionDAG &DAG,
                                                    int64_t Offset) const {
   MachineFunction &MF = DAG.getMachineFunction();
   MachinePointerInfo DstInfo = MachinePointerInfo::getStack(MF, Offset);
-  SDValue PtrOffset = DAG.getConstant(Offset, SL, MVT::i32);
-  SDValue Ptr = DAG.getNode(ISD::ADD, SL, MVT::i32, StackPtr, PtrOffset);
 
+  SDValue Ptr = DAG.getObjectPtrOffset(SL, StackPtr, Offset);
   SDValue Store = DAG.getStore(Chain, SL, ArgVal, Ptr, DstInfo, 4,
                                MachineMemOperand::MODereferenceable);
   return Store;
@@ -3982,14 +3976,21 @@ const char* AMDGPUTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(LOAD_CONSTANT)
   NODE_NAME_CASE(TBUFFER_STORE_FORMAT)
   NODE_NAME_CASE(TBUFFER_STORE_FORMAT_X3)
+  NODE_NAME_CASE(TBUFFER_STORE_FORMAT_D16)
   NODE_NAME_CASE(TBUFFER_LOAD_FORMAT)
+  NODE_NAME_CASE(TBUFFER_LOAD_FORMAT_D16)
   NODE_NAME_CASE(ATOMIC_CMP_SWAP)
   NODE_NAME_CASE(ATOMIC_INC)
   NODE_NAME_CASE(ATOMIC_DEC)
+  NODE_NAME_CASE(ATOMIC_LOAD_FADD)
+  NODE_NAME_CASE(ATOMIC_LOAD_FMIN)
+  NODE_NAME_CASE(ATOMIC_LOAD_FMAX)
   NODE_NAME_CASE(BUFFER_LOAD)
   NODE_NAME_CASE(BUFFER_LOAD_FORMAT)
+  NODE_NAME_CASE(BUFFER_LOAD_FORMAT_D16)
   NODE_NAME_CASE(BUFFER_STORE)
   NODE_NAME_CASE(BUFFER_STORE_FORMAT)
+  NODE_NAME_CASE(BUFFER_STORE_FORMAT_D16)
   NODE_NAME_CASE(BUFFER_ATOMIC_SWAP)
   NODE_NAME_CASE(BUFFER_ATOMIC_ADD)
   NODE_NAME_CASE(BUFFER_ATOMIC_SUB)
@@ -4001,6 +4002,83 @@ const char* AMDGPUTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(BUFFER_ATOMIC_OR)
   NODE_NAME_CASE(BUFFER_ATOMIC_XOR)
   NODE_NAME_CASE(BUFFER_ATOMIC_CMPSWAP)
+  NODE_NAME_CASE(IMAGE_LOAD)
+  NODE_NAME_CASE(IMAGE_LOAD_MIP)
+  NODE_NAME_CASE(IMAGE_STORE)
+  NODE_NAME_CASE(IMAGE_STORE_MIP)
+  // Basic sample.
+  NODE_NAME_CASE(IMAGE_SAMPLE)
+  NODE_NAME_CASE(IMAGE_SAMPLE_CL)
+  NODE_NAME_CASE(IMAGE_SAMPLE_D)
+  NODE_NAME_CASE(IMAGE_SAMPLE_D_CL)
+  NODE_NAME_CASE(IMAGE_SAMPLE_L)
+  NODE_NAME_CASE(IMAGE_SAMPLE_B)
+  NODE_NAME_CASE(IMAGE_SAMPLE_B_CL)
+  NODE_NAME_CASE(IMAGE_SAMPLE_LZ)
+  NODE_NAME_CASE(IMAGE_SAMPLE_CD)
+  NODE_NAME_CASE(IMAGE_SAMPLE_CD_CL)
+  // Sample with comparison.
+  NODE_NAME_CASE(IMAGE_SAMPLE_C)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_CL)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_D)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_D_CL)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_L)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_B)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_B_CL)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_LZ)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_CD)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_CD_CL)
+  // Sample with offsets.
+  NODE_NAME_CASE(IMAGE_SAMPLE_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_CL_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_D_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_D_CL_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_L_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_B_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_B_CL_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_LZ_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_CD_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_CD_CL_O)
+  // Sample with comparison and offsets.
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_CL_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_D_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_D_CL_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_L_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_B_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_B_CL_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_LZ_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_CD_O)
+  NODE_NAME_CASE(IMAGE_SAMPLE_C_CD_CL_O)
+  // Basic gather4.
+  NODE_NAME_CASE(IMAGE_GATHER4)
+  NODE_NAME_CASE(IMAGE_GATHER4_CL)
+  NODE_NAME_CASE(IMAGE_GATHER4_L)
+  NODE_NAME_CASE(IMAGE_GATHER4_B)
+  NODE_NAME_CASE(IMAGE_GATHER4_B_CL)
+  NODE_NAME_CASE(IMAGE_GATHER4_LZ)
+  // Gather4 with comparison.
+  NODE_NAME_CASE(IMAGE_GATHER4_C)
+  NODE_NAME_CASE(IMAGE_GATHER4_C_CL)
+  NODE_NAME_CASE(IMAGE_GATHER4_C_L)
+  NODE_NAME_CASE(IMAGE_GATHER4_C_B)
+  NODE_NAME_CASE(IMAGE_GATHER4_C_B_CL)
+  NODE_NAME_CASE(IMAGE_GATHER4_C_LZ)
+  // Gather4 with offsets.
+  NODE_NAME_CASE(IMAGE_GATHER4_O)
+  NODE_NAME_CASE(IMAGE_GATHER4_CL_O)
+  NODE_NAME_CASE(IMAGE_GATHER4_L_O)
+  NODE_NAME_CASE(IMAGE_GATHER4_B_O)
+  NODE_NAME_CASE(IMAGE_GATHER4_B_CL_O)
+  NODE_NAME_CASE(IMAGE_GATHER4_LZ_O)
+  // Gather4 with comparison and offsets.
+  NODE_NAME_CASE(IMAGE_GATHER4_C_O)
+  NODE_NAME_CASE(IMAGE_GATHER4_C_CL_O)
+  NODE_NAME_CASE(IMAGE_GATHER4_C_L_O)
+  NODE_NAME_CASE(IMAGE_GATHER4_C_B_O)
+  NODE_NAME_CASE(IMAGE_GATHER4_C_B_CL_O)
+  NODE_NAME_CASE(IMAGE_GATHER4_C_LZ_O)
+
   case AMDGPUISD::LAST_AMDGPU_ISD_NUMBER: break;
   }
   return nullptr;

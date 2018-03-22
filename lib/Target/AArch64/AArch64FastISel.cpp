@@ -3476,7 +3476,7 @@ bool AArch64FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
       return false;
 
     const char *IntrMemName = isa<MemCpyInst>(II) ? "memcpy" : "memmove";
-    return lowerCallTo(II, IntrMemName, II->getNumArgOperands() - 2);
+    return lowerCallTo(II, IntrMemName, II->getNumArgOperands() - 1);
   }
   case Intrinsic::memset: {
     const MemSetInst *MSI = cast<MemSetInst>(II);
@@ -3492,7 +3492,7 @@ bool AArch64FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
       // address spaces.
       return false;
 
-    return lowerCallTo(II, "memset", II->getNumArgOperands() - 2);
+    return lowerCallTo(II, "memset", II->getNumArgOperands() - 1);
   }
   case Intrinsic::sin:
   case Intrinsic::cos:
@@ -5135,11 +5135,12 @@ bool AArch64FastISel::fastSelectInstruction(const Instruction *I) {
     return selectAtomicCmpXchg(cast<AtomicCmpXchgInst>(I));
   }
 
-  // fall-back to target-independent instruction selection.
-  return selectOperator(I, I->getOpcode());
   // Silence warnings.
   (void)&CC_AArch64_DarwinPCS_VarArg;
   (void)&CC_AArch64_Win64_VarArg;
+
+  // fall-back to target-independent instruction selection.
+  return selectOperator(I, I->getOpcode());
 }
 
 namespace llvm {

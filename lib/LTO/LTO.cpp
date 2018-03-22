@@ -385,9 +385,11 @@ StringRef InputFile::getName() const {
 LTO::RegularLTOState::RegularLTOState(unsigned ParallelCodeGenParallelismLevel,
                                       Config &Conf)
     : ParallelCodeGenParallelismLevel(ParallelCodeGenParallelismLevel),
-      Ctx(Conf) {}
+      Ctx(Conf), CombinedModule(llvm::make_unique<Module>("ld-temp.o", Ctx)),
+      Mover(llvm::make_unique<IRMover>(*CombinedModule)) {}
 
-LTO::ThinLTOState::ThinLTOState(ThinBackend Backend) : Backend(Backend) {
+LTO::ThinLTOState::ThinLTOState(ThinBackend Backend)
+    : Backend(Backend), CombinedIndex(/*IsPeformingAnalysis*/ false) {
   if (!Backend)
     this->Backend =
         createInProcessThinBackend(llvm::heavyweight_hardware_concurrency());
@@ -416,8 +418,11 @@ void LTO::addModuleToGlobalRes(ArrayRef<InputFile::Symbol> Syms,
 
     auto &GlobalRes = GlobalResolutions[Sym.getName()];
     GlobalRes.UnnamedAddr &= Sym.isUnnamedAddr();
-    if (Res.Prevailing)
+    if (Res.Prevailing) {
+      assert(GlobalRes.IRName.empty() &&
+             "Multiple prevailing defs are not allowed");
       GlobalRes.IRName = Sym.getIRName();
+    }
 
     // Set the partition to external if we know it is re-defined by the linker
     // with -defsym or -wrap options, used elsewhere, e.g. it is visible to a
@@ -468,6 +473,9 @@ Error LTO::add(std::unique_ptr<InputFile> Input,
 
   if (Conf.ResolutionFile)
     writeToResolutionFile(*Conf.ResolutionFile, Input.get(), Res);
+
+  if (RegularLTO.CombinedModule->getTargetTriple().empty())
+    RegularLTO.CombinedModule->setTargetTriple(Input->getTargetTriple());
 
   const SymbolResolution *ResI = Res.begin();
   for (unsigned I = 0; I != Input->Mods.size(); ++I)
@@ -632,7 +640,8 @@ LTO::addRegularLTO(BitcodeModule BM, ArrayRef<InputFile::Symbol> Syms,
       }
 
       // Set the 'local' flag based on the linker resolution for this symbol.
-      GV->setDSOLocal(Res.FinalDefinitionInLinkageUnit);
+      if (Res.FinalDefinitionInLinkageUnit)
+        GV->setDSOLocal(Res.FinalDefinitionInLinkageUnit);
     }
     // Common resolution: collect the maximum size/alignment over all commons.
     // We also record if we see an instance of a common as prevailing, so that
@@ -656,12 +665,6 @@ LTO::addRegularLTO(BitcodeModule BM, ArrayRef<InputFile::Symbol> Syms,
 
 Error LTO::linkRegularLTO(RegularLTOState::AddedModule Mod,
                           bool LivenessFromIndex) {
-  if (!RegularLTO.CombinedModule) {
-    RegularLTO.CombinedModule =
-        llvm::make_unique<Module>("ld-temp.o", RegularLTO.Ctx);
-    RegularLTO.Mover = llvm::make_unique<IRMover>(*RegularLTO.CombinedModule);
-  }
-
   std::vector<GlobalValue *> Keep;
   for (GlobalValue *GV : Mod.Keep) {
     if (LivenessFromIndex && !ThinLTO.CombinedIndex.isGUIDLive(GV->getGUID()))
@@ -754,16 +757,9 @@ Error LTO::run(AddStreamFn AddStream, NativeObjectCache Cache) {
 
   computeDeadSymbols(ThinLTO.CombinedIndex, GUIDPreservedSymbols);
 
-  // Save the status of having a regularLTO combined module, as
-  // this is needed for generating the ThinLTO Task ID, and
-  // the CombinedModule will be moved at the end of runRegularLTO.
-  bool HasRegularLTO = RegularLTO.CombinedModule != nullptr ||
-                       !RegularLTO.ModsWithSummaries.empty();
-  // Invoke regular LTO if there was a regular LTO module to start with.
-  if (HasRegularLTO)
-    if (auto E = runRegularLTO(AddStream))
-      return E;
-  return runThinLTO(AddStream, Cache, HasRegularLTO);
+  if (auto E = runRegularLTO(AddStream))
+    return E;
+  return runThinLTO(AddStream, Cache);
 }
 
 Error LTO::runRegularLTO(AddStreamFn AddStream) {
@@ -1078,8 +1074,7 @@ ThinBackend lto::createWriteIndexesThinBackend(std::string OldPrefix,
   };
 }
 
-Error LTO::runThinLTO(AddStreamFn AddStream, NativeObjectCache Cache,
-                      bool HasRegularLTO) {
+Error LTO::runThinLTO(AddStreamFn AddStream, NativeObjectCache Cache) {
   if (ThinLTO.ModuleMap.empty())
     return Error::success();
 
@@ -1164,11 +1159,9 @@ Error LTO::runThinLTO(AddStreamFn AddStream, NativeObjectCache Cache,
       ThinLTO.Backend(Conf, ThinLTO.CombinedIndex, ModuleToDefinedGVSummaries,
                       AddStream, Cache);
 
-  // Task numbers start at ParallelCodeGenParallelismLevel if an LTO
-  // module is present, as tasks 0 through ParallelCodeGenParallelismLevel-1
-  // are reserved for parallel code generation partitions.
-  unsigned Task =
-      HasRegularLTO ? RegularLTO.ParallelCodeGenParallelismLevel : 0;
+  // Tasks 0 through ParallelCodeGenParallelismLevel-1 are reserved for combined
+  // module and parallel code generation partitions.
+  unsigned Task = RegularLTO.ParallelCodeGenParallelismLevel;
   for (auto &Mod : ThinLTO.ModuleMap) {
     if (Error E = BackendProc->start(Task, Mod.second, ImportLists[Mod.first],
                                      ExportLists[Mod.first],

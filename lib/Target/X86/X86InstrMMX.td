@@ -90,11 +90,21 @@ def MMX_CVT_PS_ITINS : OpndItins<
 >;
 }
 
+// Alias instruction that maps zero vector to pxor mmx.
+// This is expanded by ExpandPostRAPseudos to an pxor.
+// We set canFoldAsLoad because this can be converted to a constant-pool
+// load of an all-zeros value if folding it would be beneficial.
+let isReMaterializable = 1, isAsCheapAsAMove = 1, canFoldAsLoad = 1,
+    isPseudo = 1, SchedRW = [WriteZero] in {
+def MMX_SET0 : I<0, Pseudo, (outs VR64:$dst), (ins), "", []>;
+}
+
 let Constraints = "$src1 = $dst" in {
   // MMXI_binop_rm_int - Simple MMX binary operator based on intrinsic.
   // When this is cleaned up, remove the FIXME from X86RecognizableInstr.cpp.
   multiclass MMXI_binop_rm_int<bits<8> opc, string OpcodeStr, Intrinsic IntId,
-                               OpndItins itins, bit Commutable = 0> {
+                               OpndItins itins, bit Commutable = 0,
+                               X86MemOperand OType = i64mem> {
     def irr : MMXI<opc, MRMSrcReg, (outs VR64:$dst),
                  (ins VR64:$src1, VR64:$src2),
                  !strconcat(OpcodeStr, "\t{$src2, $dst|$dst, $src2}"),
@@ -103,7 +113,7 @@ let Constraints = "$src1 = $dst" in {
       let isCommutable = Commutable;
     }
     def irm : MMXI<opc, MRMSrcMem, (outs VR64:$dst),
-                 (ins VR64:$src1, i64mem:$src2),
+                 (ins VR64:$src1, OType:$src2),
                  !strconcat(OpcodeStr, "\t{$src2, $dst|$dst, $src2}"),
                  [(set VR64:$dst, (IntId VR64:$src1,
                                    (bitconvert (load_mmx addr:$src2))))],
@@ -234,9 +244,12 @@ let Predicates = [HasMMX] in {
   let AddedComplexity = 15 in
     def : Pat<(x86mmx (MMX_X86movw2d GR32:$src)),
               (MMX_MOVD64rr GR32:$src)>;
-  let AddedComplexity = 20 in
+  let AddedComplexity = 20 in {
+    def : Pat<(x86mmx (MMX_X86movw2d (i32 0))),
+              (MMX_SET0)>;
     def : Pat<(x86mmx (MMX_X86movw2d (loadi32 addr:$src))),
               (MMX_MOVD64rm addr:$src)>;
+  }
 }
 
 let mayStore = 1 in
@@ -253,13 +266,13 @@ def MMX_MOVD64grr : MMXI<0x7E, MRMDestReg, (outs GR32:$dst), (ins VR64:$src),
 
 let isBitcast = 1 in
 def MMX_MOVD64to64rr : MMXRI<0x6E, MRMSrcReg, (outs VR64:$dst), (ins GR64:$src),
-                             "movd\t{$src, $dst|$dst, $src}",
+                             "movq\t{$src, $dst|$dst, $src}",
                              [(set VR64:$dst, (bitconvert GR64:$src))],
                              IIC_MMX_MOV_MM_RM>, Sched<[WriteMove]>;
 
 let isCodeGenOnly = 1, ForceDisassemble = 1, hasSideEffects = 0, mayLoad = 1 in
 def MMX_MOVD64to64rm : MMXRI<0x6E, MRMSrcMem, (outs VR64:$dst),
-                             (ins i64mem:$src), "movd\t{$src, $dst|$dst, $src}",
+                             (ins i64mem:$src), "movq\t{$src, $dst|$dst, $src}",
                              [], IIC_MMX_MOVQ_RM>, Sched<[WriteLoad]>;
 
 // These are 64 bit moves, but since the OS X assembler doesn't
@@ -268,7 +281,7 @@ def MMX_MOVD64to64rm : MMXRI<0x6E, MRMSrcMem, (outs VR64:$dst),
 let SchedRW = [WriteMove], isBitcast = 1 in {
 def MMX_MOVD64from64rr : MMXRI<0x7E, MRMDestReg,
                                (outs GR64:$dst), (ins VR64:$src),
-                               "movd\t{$src, $dst|$dst, $src}",
+                               "movq\t{$src, $dst|$dst, $src}",
                              [(set GR64:$dst,
                               (bitconvert VR64:$src))], IIC_MMX_MOV_REG_MM>;
 let hasSideEffects = 0 in
@@ -285,7 +298,7 @@ def MMX_MOVQ64rr_REV : MMXI<0x7F, MRMDestReg, (outs VR64:$dst), (ins VR64:$src),
 let isCodeGenOnly = 1, ForceDisassemble = 1, hasSideEffects = 0, mayStore = 1 in
 def MMX_MOVD64from64rm : MMXRI<0x7E, MRMDestMem,
                                (outs), (ins i64mem:$dst, VR64:$src),
-                               "movd\t{$src, $dst|$dst, $src}",
+                               "movq\t{$src, $dst|$dst, $src}",
                                [], IIC_MMX_MOV_REG_MM>, Sched<[WriteStore]>;
 
 let SchedRW = [WriteLoad] in {
@@ -524,13 +537,16 @@ defm MMX_PUNPCKHDQ : MMXI_binop_rm_int<0x6A, "punpckhdq",
                                        MMX_UNPCK_H_ITINS>;
 defm MMX_PUNPCKLBW : MMXI_binop_rm_int<0x60, "punpcklbw",
                                        int_x86_mmx_punpcklbw,
-                                       MMX_UNPCK_L_ITINS>;
+                                       MMX_UNPCK_L_ITINS,
+                                       0, i32mem>;
 defm MMX_PUNPCKLWD : MMXI_binop_rm_int<0x61, "punpcklwd",
                                        int_x86_mmx_punpcklwd,
-                                       MMX_UNPCK_L_ITINS>;
+                                       MMX_UNPCK_L_ITINS,
+                                       0, i32mem>;
 defm MMX_PUNPCKLDQ : MMXI_binop_rm_int<0x62, "punpckldq",
                                        int_x86_mmx_punpckldq,
-                                       MMX_UNPCK_L_ITINS>;
+                                       MMX_UNPCK_L_ITINS,
+                                       0, i32mem>;
 
 // -- Pack Instructions
 defm MMX_PACKSSWB : MMXI_binop_rm_int<0x63, "packsswb", int_x86_mmx_packsswb,

@@ -15,8 +15,6 @@
 
 #include "llvm/IR/AutoUpgrade.h"
 #include "llvm/ADT/StringSwitch.h"
-#include "llvm/IR/CFG.h"
-#include "llvm/IR/CallSite.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/DebugInfo.h"
@@ -78,6 +76,7 @@ static bool ShouldUpgradeX86Intrinsic(Function *F, StringRef Name) {
       Name=="ssse3.pabs.d.128" || // Added in 6.0
       Name.startswith("avx512.mask.shuf.i") || // Added in 6.0
       Name.startswith("avx512.mask.shuf.f") || // Added in 6.0
+      Name.startswith("avx512.kunpck") || //added in 6.0 
       Name.startswith("avx2.pabs.") || // Added in 6.0
       Name.startswith("avx512.mask.pabs.") || // Added in 6.0
       Name.startswith("avx512.broadcastm") || // Added in 6.0
@@ -159,6 +158,10 @@ static bool ShouldUpgradeX86Intrinsic(Function *F, StringRef Name) {
       Name.startswith("avx512.mask.cmp.q") || // Added in 5.0
       Name.startswith("avx512.mask.cmp.w") || // Added in 5.0
       Name.startswith("avx512.mask.ucmp.") || // Added in 5.0
+      Name.startswith("avx512.cvtb2mask.") || // Added in 7.0
+      Name.startswith("avx512.cvtw2mask.") || // Added in 7.0
+      Name.startswith("avx512.cvtd2mask.") || // Added in 7.0
+      Name.startswith("avx512.cvtq2mask.") || // Added in 7.0
       Name == "avx512.mask.add.pd.128" || // Added in 4.0
       Name == "avx512.mask.add.pd.256" || // Added in 4.0
       Name == "avx512.mask.add.ps.128" || // Added in 4.0
@@ -520,6 +523,37 @@ static bool UpgradeIntrinsicFunction1(Function *F, Function *&NewFn) {
         return true;
       }
     }
+    // Updating the memory intrinsics (memcpy/memmove/memset) that have an
+    // alignment parameter to embedding the alignment as an attribute of
+    // the pointer args.
+    if (Name.startswith("memcpy.") && F->arg_size() == 5) {
+      rename(F);
+      // Get the types of dest, src, and len
+      ArrayRef<Type *> ParamTypes = F->getFunctionType()->params().slice(0, 3);
+      NewFn = Intrinsic::getDeclaration(F->getParent(), Intrinsic::memcpy,
+                                        ParamTypes);
+      return true;
+    }
+    if (Name.startswith("memmove.") && F->arg_size() == 5) {
+      rename(F);
+      // Get the types of dest, src, and len
+      ArrayRef<Type *> ParamTypes = F->getFunctionType()->params().slice(0, 3);
+      NewFn = Intrinsic::getDeclaration(F->getParent(), Intrinsic::memmove,
+                                        ParamTypes);
+      return true;
+    }
+    if (Name.startswith("memset.") && F->arg_size() == 5) {
+      rename(F);
+      // Get the types of dest, and len
+      const auto *FT = F->getFunctionType();
+      Type *ParamTypes[2] = {
+          FT->getParamType(0), // Dest
+          FT->getParamType(2)  // len
+      };
+      NewFn = Intrinsic::getDeclaration(F->getParent(), Intrinsic::memset,
+                                        ParamTypes);
+      return true;
+    }
     break;
   }
   case 'n': {
@@ -831,9 +865,11 @@ static Value *upgradeIntMinMax(IRBuilder<> &Builder, CallInst &CI,
 // Applying mask on vector of i1's and make sure result is at least 8 bits wide.
 static Value *ApplyX86MaskOn1BitsVec(IRBuilder<> &Builder,Value *Vec, Value *Mask,
                                      unsigned NumElts) {
-  const auto *C = dyn_cast<Constant>(Mask);
-  if (!C || !C->isAllOnesValue())
-    Vec = Builder.CreateAnd(Vec, getX86MaskVec(Builder, Mask, NumElts));
+  if (Mask) {
+    const auto *C = dyn_cast<Constant>(Mask);
+    if (!C || !C->isAllOnesValue())
+      Vec = Builder.CreateAnd(Vec, getX86MaskVec(Builder, Mask, NumElts));
+  }
 
   if (NumElts < 8) {
     uint32_t Indices[8];
@@ -1065,6 +1101,24 @@ void llvm::UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
       Rep = Builder.CreateVectorSplat(NumElts, CI->getArgOperand(0));
       Rep = EmitX86Select(Builder, CI->getArgOperand(2), Rep,
                           CI->getArgOperand(1));
+    } else if (IsX86 && (Name.startswith("avx512.kunpck"))) {
+      unsigned NumElts = CI->getType()->getScalarSizeInBits();
+      Value *LHS = getX86MaskVec(Builder, CI->getArgOperand(0), NumElts);
+      Value *RHS = getX86MaskVec(Builder, CI->getArgOperand(1), NumElts);
+      uint32_t Indices[64];
+      for (unsigned i = 0; i != NumElts; ++i)
+        Indices[i] = i;
+
+      // First extract half of each vector. This gives better codegen than
+      // doing it in a single shuffle.
+      LHS = Builder.CreateShuffleVector(LHS, LHS,
+                                        makeArrayRef(Indices, NumElts / 2));
+      RHS = Builder.CreateShuffleVector(RHS, RHS,
+                                        makeArrayRef(Indices, NumElts / 2));
+      // Concat the vectors.
+      Rep = Builder.CreateShuffleVector(LHS, RHS,
+                                        makeArrayRef(Indices, NumElts));
+      Rep = Builder.CreateBitCast(Rep, CI->getType());
     } else if (IsX86 && (Name == "sse.add.ss" || Name == "sse2.add.sd")) {
       Type *I32Ty = Type::getInt32Ty(C);
       Value *Elt0 = Builder.CreateExtractElement(CI->getArgOperand(0),
@@ -1111,6 +1165,15 @@ void llvm::UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
     } else if (IsX86 && Name.startswith("avx512.mask.ucmp")) {
       unsigned Imm = cast<ConstantInt>(CI->getArgOperand(2))->getZExtValue();
       Rep = upgradeMaskedCompare(Builder, *CI, Imm, false);
+    } else if (IsX86 && (Name.startswith("avx512.cvtb2mask.") ||
+                         Name.startswith("avx512.cvtw2mask.") ||
+                         Name.startswith("avx512.cvtd2mask.") ||
+                         Name.startswith("avx512.cvtq2mask."))) {
+      Value *Op = CI->getArgOperand(0);
+      Value *Zero = llvm::Constant::getNullValue(Op->getType());
+      Rep = Builder.CreateICmp(ICmpInst::ICMP_SLT, Op, Zero);
+      Rep = ApplyX86MaskOn1BitsVec(Builder, Rep, nullptr,
+                                   Op->getType()->getVectorNumElements());
     } else if(IsX86 && (Name == "ssse3.pabs.b.128" ||
                         Name == "ssse3.pabs.w.128" ||
                         Name == "ssse3.pabs.d.128" ||
@@ -2167,14 +2230,17 @@ void llvm::UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
     return;
   }
 
-  CallInst *NewCall = nullptr;
-  switch (NewFn->getIntrinsicID()) {
-  default: {
+  const auto &DefaultCase = [&NewFn, &CI]() -> void {
     // Handle generic mangling change, but nothing else
     assert(
         (CI->getCalledFunction()->getName() != NewFn->getName()) &&
         "Unknown function for CallInst upgrade and isn't just a name change");
     CI->setCalledFunction(NewFn);
+  };
+  CallInst *NewCall = nullptr;
+  switch (NewFn->getIntrinsicID()) {
+  default: {
+    DefaultCase();
     return;
   }
 
@@ -2313,6 +2379,35 @@ void llvm::UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
     SmallVector<Value *, 4> Args(CI->arg_operands().begin(),
                                  CI->arg_operands().end());
     NewCall = Builder.CreateCall(NewFn, Args);
+    break;
+  }
+
+  case Intrinsic::memcpy:
+  case Intrinsic::memmove:
+  case Intrinsic::memset: {
+    // We have to make sure that the call signature is what we're expecting.
+    // We only want to change the old signatures by removing the alignment arg:
+    //  @llvm.mem[cpy|move]...(i8*, i8*, i[32|i64], i32, i1)
+    //    -> @llvm.mem[cpy|move]...(i8*, i8*, i[32|i64], i1)
+    //  @llvm.memset...(i8*, i8, i[32|64], i32, i1)
+    //    -> @llvm.memset...(i8*, i8, i[32|64], i1)
+    // Note: i8*'s in the above can be any pointer type
+    if (CI->getNumArgOperands() != 5) {
+      DefaultCase();
+      return;
+    }
+    // Remove alignment argument (3), and add alignment attributes to the
+    // dest/src pointers.
+    Value *Args[4] = {CI->getArgOperand(0), CI->getArgOperand(1),
+                      CI->getArgOperand(2), CI->getArgOperand(4)};
+    NewCall = Builder.CreateCall(NewFn, Args);
+    auto *MemCI = cast<MemIntrinsic>(NewCall);
+    // All mem intrinsics support dest alignment.
+    const ConstantInt *Align = cast<ConstantInt>(CI->getArgOperand(3));
+    MemCI->setDestAlignment(Align->getZExtValue());
+    // Memcpy/Memmove also support source alignment.
+    if (auto *MTI = dyn_cast<MemTransferInst>(MemCI))
+      MTI->setSourceAlignment(Align->getZExtValue());
     break;
   }
   }

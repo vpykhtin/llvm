@@ -27,12 +27,13 @@ using namespace llvm;
 
 namespace {
 class RISCVAsmBackend : public MCAsmBackend {
+  const MCSubtargetInfo &STI;
   uint8_t OSABI;
   bool Is64Bit;
 
 public:
-  RISCVAsmBackend(uint8_t OSABI, bool Is64Bit)
-      : MCAsmBackend(), OSABI(OSABI), Is64Bit(Is64Bit) {}
+  RISCVAsmBackend(const MCSubtargetInfo &STI, uint8_t OSABI, bool Is64Bit)
+      : MCAsmBackend(), STI(STI), OSABI(OSABI), Is64Bit(Is64Bit) {}
   ~RISCVAsmBackend() override {}
 
   void applyFixup(const MCAssembler &Asm, const MCFixup &Fixup,
@@ -63,7 +64,9 @@ public:
       { "fixup_riscv_lo12_s",      0,     32,  0 },
       { "fixup_riscv_pcrel_hi20", 12,     20,  MCFixupKindInfo::FKF_IsPCRel },
       { "fixup_riscv_jal",        12,     20,  MCFixupKindInfo::FKF_IsPCRel },
-      { "fixup_riscv_branch",      0,     32,  MCFixupKindInfo::FKF_IsPCRel }
+      { "fixup_riscv_branch",      0,     32,  MCFixupKindInfo::FKF_IsPCRel },
+      { "fixup_riscv_rvc_jump",    2,     11,  MCFixupKindInfo::FKF_IsPCRel },
+      { "fixup_riscv_rvc_branch",  0,     16,  MCFixupKindInfo::FKF_IsPCRel }
     };
 
     if (Kind < FirstTargetFixupKind)
@@ -86,14 +89,23 @@ public:
 };
 
 bool RISCVAsmBackend::writeNopData(uint64_t Count, MCObjectWriter *OW) const {
-  // Once support for the compressed instruction set is added, we will be able
-  // to conditionally support 16-bit NOPs
-  if ((Count % 4) != 0)
+  bool HasStdExtC = STI.getFeatureBits()[RISCV::FeatureStdExtC];
+  unsigned MinNopLen = HasStdExtC ? 2 : 4;
+
+  if ((Count % MinNopLen) != 0)
     return false;
 
-  // The canonical nop on RISC-V is addi x0, x0, 0
-  for (uint64_t i = 0; i < Count; i += 4)
+  // The canonical nop on RISC-V is addi x0, x0, 0.
+  uint64_t Nop32Count = Count / 4;
+  for (uint64_t i = Nop32Count; i != 0; --i)
     OW->write32(0x13);
+
+  // The canonical nop on RVC is c.nop.
+  if (HasStdExtC) {
+    uint64_t Nop16Count = (Count - Nop32Count * 4) / 2;
+    for (uint64_t i = Nop16Count; i != 0; --i)
+      OW->write16(0x01);
+  }
 
   return true;
 }
@@ -152,7 +164,42 @@ static uint64_t adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
     Value = (Sbit << 31) | (Mid6 << 25) | (Lo4 << 8) | (Hi1 << 7);
     return Value;
   }
+  case RISCV::fixup_riscv_rvc_jump: {
+    // Need to produce offset[11|4|9:8|10|6|7|3:1|5] from the 11-bit Value.
+    unsigned Bit11  = (Value >> 11) & 0x1;
+    unsigned Bit4   = (Value >> 4) & 0x1;
+    unsigned Bit9_8 = (Value >> 8) & 0x3;
+    unsigned Bit10  = (Value >> 10) & 0x1;
+    unsigned Bit6   = (Value >> 6) & 0x1;
+    unsigned Bit7   = (Value >> 7) & 0x1;
+    unsigned Bit3_1 = (Value >> 1) & 0x7;
+    unsigned Bit5   = (Value >> 5) & 0x1;
+    Value = (Bit11 << 10) | (Bit4 << 9) | (Bit9_8 << 7) | (Bit10 << 6) |
+            (Bit6 << 5) | (Bit7 << 4) | (Bit3_1 << 1) | Bit5;
+    return Value;
+  }
+  case RISCV::fixup_riscv_rvc_branch: {
+    // Need to produce offset[8|4:3], [reg 3 bit], offset[7:6|2:1|5]
+    unsigned Bit8   = (Value >> 8) & 0x1;
+    unsigned Bit7_6 = (Value >> 6) & 0x3;
+    unsigned Bit5   = (Value >> 5) & 0x1;
+    unsigned Bit4_3 = (Value >> 3) & 0x3;
+    unsigned Bit2_1 = (Value >> 1) & 0x3;
+    Value = (Bit8 << 12) | (Bit4_3 << 10) | (Bit7_6 << 5) | (Bit2_1 << 3) |
+            (Bit5 << 2);
+    return Value;
+  }
 
+  }
+}
+
+static unsigned getSize(unsigned Kind) {
+  switch (Kind) {
+  default:
+    return 4;
+  case RISCV::fixup_riscv_rvc_jump:
+  case RISCV::fixup_riscv_rvc_branch:
+    return 2;
   }
 }
 
@@ -171,6 +218,7 @@ void RISCVAsmBackend::applyFixup(const MCAssembler &Asm, const MCFixup &Fixup,
   Value <<= Info.TargetOffset;
 
   unsigned Offset = Fixup.getOffset();
+  unsigned FullSize = getSize(Fixup.getKind());
 
 #ifndef NDEBUG
   unsigned NumBytes = (Info.TargetSize + 7) / 8;
@@ -179,7 +227,7 @@ void RISCVAsmBackend::applyFixup(const MCAssembler &Asm, const MCFixup &Fixup,
 
   // For each byte of the fragment that the fixup touches, mask in the
   // bits from the fixup value.
-  for (unsigned i = 0; i != 4; ++i) {
+  for (unsigned i = 0; i != FullSize; ++i) {
     Data[Offset + i] |= uint8_t((Value >> (i * 8)) & 0xff);
   }
 }
@@ -192,9 +240,10 @@ RISCVAsmBackend::createObjectWriter(raw_pwrite_stream &OS) const {
 } // end anonymous namespace
 
 MCAsmBackend *llvm::createRISCVAsmBackend(const Target &T,
+                                          const MCSubtargetInfo &STI,
                                           const MCRegisterInfo &MRI,
-                                          const Triple &TT, StringRef CPU,
                                           const MCTargetOptions &Options) {
+  const Triple &TT = STI.getTargetTriple();
   uint8_t OSABI = MCELFObjectTargetWriter::getOSABI(TT.getOS());
-  return new RISCVAsmBackend(OSABI, TT.isArch64Bit());
+  return new RISCVAsmBackend(STI, OSABI, TT.isArch64Bit());
 }
