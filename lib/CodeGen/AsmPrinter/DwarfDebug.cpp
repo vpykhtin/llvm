@@ -288,9 +288,11 @@ DwarfDebug::DwarfDebug(AsmPrinter *A, Module *M)
   else
     DebuggerTuning = DebuggerKind::GDB;
 
-  // Turn on accelerator tables for LLDB by default.
+  // Turn on accelerator tables by default, if tuning for LLDB and the target is
+  // supported.
   if (DwarfAccelTables == Default)
-    HasDwarfAccelTables = tuneForLLDB();
+    HasDwarfAccelTables =
+        tuneForLLDB() && A->TM.getTargetTriple().isOSBinFormatMachO();
   else
     HasDwarfAccelTables = DwarfAccelTables == Enable;
 
@@ -1163,7 +1165,7 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
   DebugHandlerBase::beginInstruction(MI);
   assert(CurMI);
 
-  const auto *SP = MI->getMF()->getFunction()->getSubprogram();
+  const auto *SP = MI->getMF()->getFunction().getSubprogram();
   if (!SP || SP->getUnit()->getEmissionKind() == DICompileUnit::NoDebug)
     return;
 
@@ -1261,7 +1263,7 @@ static DebugLoc findPrologueEndLoc(const MachineFunction *MF) {
 void DwarfDebug::beginFunctionImpl(const MachineFunction *MF) {
   CurFn = MF;
 
-  auto *SP = MF->getFunction()->getSubprogram();
+  auto *SP = MF->getFunction().getSubprogram();
   assert(LScopes.empty() || SP == LScopes.getCurrentFunctionScope()->getScopeNode());
   if (SP->getUnit()->getEmissionKind() == DICompileUnit::NoDebug)
     return;
@@ -1297,7 +1299,7 @@ void DwarfDebug::skippedNonDebugFunction() {
 
 // Gather and emit post-function debug information.
 void DwarfDebug::endFunctionImpl(const MachineFunction *MF) {
-  const DISubprogram *SP = MF->getFunction()->getSubprogram();
+  const DISubprogram *SP = MF->getFunction().getSubprogram();
 
   assert(CurFn == MF &&
       "endFunction should be called with the same function as beginFunction");
@@ -1366,19 +1368,17 @@ void DwarfDebug::endFunctionImpl(const MachineFunction *MF) {
 void DwarfDebug::recordSourceLine(unsigned Line, unsigned Col, const MDNode *S,
                                   unsigned Flags) {
   StringRef Fn;
-  StringRef Dir;
   unsigned Src = 1;
   unsigned Discriminator = 0;
   if (auto *Scope = cast_or_null<DIScope>(S)) {
     Fn = Scope->getFilename();
-    Dir = Scope->getDirectory();
     if (Line != 0 && getDwarfVersion() >= 4)
       if (auto *LBF = dyn_cast<DILexicalBlockFile>(Scope))
         Discriminator = LBF->getDiscriminator();
 
     unsigned CUID = Asm->OutStreamer->getContext().getDwarfCompileUnitID();
     Src = static_cast<DwarfCompileUnit &>(*InfoHolder.getUnits()[CUID])
-              .getOrCreateSourceID(Fn, Dir);
+              .getOrCreateSourceID(Scope->getFile());
   }
   Asm->OutStreamer->EmitDwarfLocDirective(Src, Line, Col, Flags, 0,
                                           Discriminator, Fn);
@@ -1973,10 +1973,7 @@ void DwarfDebug::emitMacroFile(DIMacroFile &F, DwarfCompileUnit &U) {
   assert(F.getMacinfoType() == dwarf::DW_MACINFO_start_file);
   Asm->EmitULEB128(dwarf::DW_MACINFO_start_file);
   Asm->EmitULEB128(F.getLine());
-  DIFile *File = F.getFile();
-  unsigned FID =
-      U.getOrCreateSourceID(File->getFilename(), File->getDirectory());
-  Asm->EmitULEB128(FID);
+  Asm->EmitULEB128(U.getOrCreateSourceID(F.getFile()));
   handleMacroNodes(F.getElements(), U);
   Asm->EmitULEB128(dwarf::DW_MACINFO_end_file);
 }

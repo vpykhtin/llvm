@@ -177,10 +177,10 @@ public:
   Expected<ArrayRef<uint8_t>> getSectionContents(const Elf_Shdr *Sec) const;
 };
 
-using ELF32LEFile = ELFFile<ELFType<support::little, false>>;
-using ELF64LEFile = ELFFile<ELFType<support::little, true>>;
-using ELF32BEFile = ELFFile<ELFType<support::big, false>>;
-using ELF64BEFile = ELFFile<ELFType<support::big, true>>;
+using ELF32LEFile = ELFFile<ELF32LE>;
+using ELF64LEFile = ELFFile<ELF64LE>;
+using ELF32BEFile = ELFFile<ELF32BE>;
+using ELF64BEFile = ELFFile<ELF64BE>;
 
 template <class ELFT>
 inline Expected<const typename ELFT::Shdr *>
@@ -276,6 +276,9 @@ ELFFile<ELFT>::getSectionContentsAsArray(const Elf_Shdr *Sec) const {
   if ((std::numeric_limits<uintX_t>::max() - Offset < Size) ||
       Offset + Size > Buf.size())
     return createError("invalid section offset");
+
+  if (Offset % alignof(T))
+    return createError("unaligned data");
 
   const T *Start = reinterpret_cast<const T *>(base() + Offset);
   return makeArrayRef(Start, Size / sizeof(T));

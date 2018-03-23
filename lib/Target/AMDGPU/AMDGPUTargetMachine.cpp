@@ -579,10 +579,9 @@ public:
 
 } // end anonymous namespace
 
-TargetIRAnalysis AMDGPUTargetMachine::getTargetIRAnalysis() {
-  return TargetIRAnalysis([this](const Function &F) {
-    return TargetTransformInfo(AMDGPUTTIImpl(this, F));
-  });
+TargetTransformInfo
+AMDGPUTargetMachine::getTargetTransformInfo(const Function &F) {
+  return TargetTransformInfo(AMDGPUTTIImpl(this, F));
 }
 
 void AMDGPUPassConfig::addEarlyCSEOrGVNPass() {
@@ -793,7 +792,7 @@ void GCNPassConfig::addMachineSSAOptimization() {
   addPass(&SILoadStoreOptimizerID);
   if (EnableSDWAPeephole) {
     addPass(&SIPeepholeSDWAID);
-    addPass(&MachineLICMID);
+    addPass(&EarlyMachineLICMID);
     addPass(&MachineCSEID);
     addPass(&SIFoldOperandsID);
     addPass(&DeadMachineInstructionElimID);
@@ -908,4 +907,3 @@ void GCNPassConfig::addPreEmitPass() {
 TargetPassConfig *GCNTargetMachine::createPassConfig(PassManagerBase &PM) {
   return new GCNPassConfig(*this, PM);
 }
-

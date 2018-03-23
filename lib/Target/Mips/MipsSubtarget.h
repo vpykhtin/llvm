@@ -44,6 +44,12 @@ class MipsSubtarget : public MipsGenSubtargetInfo {
 
   enum class CPU { P5600 };
 
+  // Used to avoid printing dsp warnings multiple times.
+  static bool DspWarningPrinted;
+
+  // Used to avoid printing msa warnings multiple times.
+  static bool MSAWarningPrinted;
+
   // Mips architecture version
   MipsArchEnum MipsArchVersion;
 
@@ -265,7 +271,6 @@ public:
   }
   bool inMicroMipsMode() const { return InMicroMipsMode; }
   bool inMicroMips32r6Mode() const { return InMicroMipsMode && hasMips32r6(); }
-  bool inMicroMips64r6Mode() const { return InMicroMipsMode && hasMips64r6(); }
   bool hasDSP() const { return HasDSP; }
   bool hasDSPR2() const { return HasDSPR2; }
   bool hasDSPR3() const { return HasDSPR3; }

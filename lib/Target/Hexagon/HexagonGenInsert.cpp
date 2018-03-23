@@ -55,6 +55,12 @@ static cl::opt<unsigned> VRegDistCutoff("insert-dist-cutoff", cl::init(30U),
   cl::Hidden, cl::ZeroOrMore, cl::desc("Vreg distance cutoff for insert "
   "generation."));
 
+// Limit the container sizes for extreme cases where we run out of memory.
+static cl::opt<unsigned> MaxORLSize("insert-max-orl", cl::init(4096),
+  cl::Hidden, cl::ZeroOrMore, cl::desc("Maximum size of OrderedRegisterList"));
+static cl::opt<unsigned> MaxIFMSize("insert-max-ifmap", cl::init(1024),
+  cl::Hidden, cl::ZeroOrMore, cl::desc("Maximum size of IFMap"));
+
 static cl::opt<bool> OptTiming("insert-timing", cl::init(false), cl::Hidden,
   cl::ZeroOrMore, cl::desc("Enable timing of insert generation"));
 static cl::opt<bool> OptTimingDetail("insert-timing-detail", cl::init(false),
@@ -86,6 +92,7 @@ namespace {
   struct RegisterSet : private BitVector {
     RegisterSet() = default;
     explicit RegisterSet(unsigned s, bool t = false) : BitVector(s, t) {}
+    RegisterSet(const RegisterSet &RS) : BitVector(RS) {}
 
     using BitVector::clear;
 
@@ -370,9 +377,11 @@ namespace {
 
   class OrderedRegisterList {
     using ListType = std::vector<unsigned>;
+    const unsigned MaxSize;
 
   public:
-    OrderedRegisterList(const RegisterOrdering &RO) : Ord(RO) {}
+    OrderedRegisterList(const RegisterOrdering &RO)
+      : MaxSize(MaxORLSize), Ord(RO) {}
 
     void insert(unsigned VR);
     void remove(unsigned VR);
@@ -433,12 +442,17 @@ void OrderedRegisterList::insert(unsigned VR) {
     Seq.push_back(VR);
   else
     Seq.insert(L, VR);
+
+  unsigned S = Seq.size();
+  if (S > MaxSize)
+    Seq.resize(MaxSize);
+  assert(Seq.size() <= MaxSize);
 }
 
 void OrderedRegisterList::remove(unsigned VR) {
   iterator L = std::lower_bound(Seq.begin(), Seq.end(), VR, Ord);
-  assert(L != Seq.end());
-  Seq.erase(L);
+  if (L != Seq.end())
+    Seq.erase(L);
 }
 
 namespace {
@@ -915,7 +929,7 @@ bool HexagonGenInsert::findRecordInsertForms(unsigned VR,
 void HexagonGenInsert::collectInBlock(MachineBasicBlock *B,
       OrderedRegisterList &AVs) {
   if (isDebug())
-    dbgs() << "visiting block BB#" << B->getNumber() << "\n";
+    dbgs() << "visiting block " << printMBBReference(*B) << "\n";
 
   // First, check if this block is reachable at all. If not, the bit tracker
   // will not have any information about registers in it.
@@ -950,6 +964,9 @@ void HexagonGenInsert::collectInBlock(MachineBasicBlock *B,
           continue;
 
         findRecordInsertForms(VR, AVs);
+        // Stop if the map size is too large.
+        if (IFMap.size() > MaxIFMSize)
+          return;
       }
     }
 
@@ -1106,10 +1123,10 @@ void HexagonGenInsert::pruneCoveredSets(unsigned VR) {
 
   // Now, remove those whose sets of potentially removable registers are
   // contained in another IF candidate for VR. For example, given these
-  // candidates for vreg45,
-  //   %vreg45:
-  //     (%vreg44,%vreg41,#9,#8), { %vreg42 }
-  //     (%vreg43,%vreg41,#9,#8), { %vreg42 %vreg44 }
+  // candidates for %45,
+  //   %45:
+  //     (%44,%41,#9,#8), { %42 }
+  //     (%43,%41,#9,#8), { %42 %44 }
   // remove the first one, since it is contained in the second one.
   for (unsigned i = 0, n = LL.size(); i < n; ) {
     const RegisterSet &RMi = LL[i].second;
@@ -1482,7 +1499,7 @@ bool HexagonGenInsert::removeDeadCode(MachineDomTreeNode *N) {
 }
 
 bool HexagonGenInsert::runOnMachineFunction(MachineFunction &MF) {
-  if (skipFunction(*MF.getFunction()))
+  if (skipFunction(MF.getFunction()))
     return false;
 
   bool Timing = OptTiming, TimingDetail = Timing && OptTimingDetail;

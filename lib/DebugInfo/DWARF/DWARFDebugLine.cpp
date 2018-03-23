@@ -12,7 +12,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/BinaryFormat/Dwarf.h"
-#include "llvm/DebugInfo/DWARF/DWARFContext.h"
 #include "llvm/DebugInfo/DWARF/DWARFFormValue.h"
 #include "llvm/DebugInfo/DWARF/DWARFRelocMap.h"
 #include "llvm/Support/Format.h"
@@ -49,6 +48,7 @@ void DWARFDebugLine::Prologue::clear() {
   MinInstLength = MaxOpsPerInst = DefaultIsStmt = LineBase = LineRange = 0;
   OpcodeBase = 0;
   FormParams = DWARFFormParams({0, 0, DWARF32});
+  HasMD5 = false;
   StandardOpcodeLengths.clear();
   IncludeDirectories.clear();
   FileNames.clear();
@@ -73,21 +73,32 @@ void DWARFDebugLine::Prologue::dump(raw_ostream &OS) const {
     OS << format("standard_opcode_lengths[%s] = %u\n",
                  LNStandardString(I + 1).data(), StandardOpcodeLengths[I]);
 
-  if (!IncludeDirectories.empty())
+  if (!IncludeDirectories.empty()) {
+    // DWARF v5 starts directory indexes at 0.
+    uint32_t DirBase = getVersion() >= 5 ? 0 : 1;
     for (uint32_t I = 0; I != IncludeDirectories.size(); ++I)
-      OS << format("include_directories[%3u] = '", I + 1)
+      OS << format("include_directories[%3u] = '", I + DirBase)
          << IncludeDirectories[I] << "'\n";
+  }
 
   if (!FileNames.empty()) {
-    OS << "                Dir  Mod Time   File Len   File Name\n"
-       << "                ---- ---------- ---------- -----------"
-          "----------------\n";
+    if (HasMD5)
+      OS << "                Dir  MD5 Checksum                     File Name\n"
+         << "                ---- -------------------------------- -----------"
+            "---------------\n";
+    else
+      OS << "                Dir  Mod Time   File Len   File Name\n"
+         << "                ---- ---------- ---------- -----------"
+            "----------------\n";
     for (uint32_t I = 0; I != FileNames.size(); ++I) {
       const FileNameEntry &FileEntry = FileNames[I];
-      OS << format("file_names[%3u] %4" PRIu64 " ", I + 1, FileEntry.DirIdx)
-         << format("0x%8.8" PRIx64 " 0x%8.8" PRIx64 " ", FileEntry.ModTime,
-                   FileEntry.Length)
-         << FileEntry.Name << '\n';
+      OS << format("file_names[%3u] %4" PRIu64 " ", I + 1, FileEntry.DirIdx);
+      if (HasMD5)
+        OS << FileEntry.Checksum.digest();
+      else
+        OS << format("0x%8.8" PRIx64 " 0x%8.8" PRIx64, FileEntry.ModTime,
+                     FileEntry.Length);
+      OS << ' ' << FileEntry.Name << '\n';
     }
   }
 }
@@ -123,7 +134,7 @@ parseV2DirFileTables(const DWARFDataExtractor &DebugLineData,
 // ran off the end of the prologue.
 static ContentDescriptors
 parseV5EntryFormat(const DWARFDataExtractor &DebugLineData, uint32_t *OffsetPtr,
-                   uint64_t EndPrologueOffset) {
+                   uint64_t EndPrologueOffset, bool *HasMD5) {
   ContentDescriptors Descriptors;
   int FormatCount = DebugLineData.getU8(OffsetPtr);
   bool HasPath = false;
@@ -136,6 +147,8 @@ parseV5EntryFormat(const DWARFDataExtractor &DebugLineData, uint32_t *OffsetPtr,
     Descriptor.Form = dwarf::Form(DebugLineData.getULEB128(OffsetPtr));
     if (Descriptor.Type == dwarf::DW_LNCT_path)
       HasPath = true;
+    else if (Descriptor.Type == dwarf::DW_LNCT_MD5 && HasMD5)
+      *HasMD5 = true;
     Descriptors.push_back(Descriptor);
   }
   return HasPath ? Descriptors : ContentDescriptors();
@@ -145,11 +158,11 @@ static bool
 parseV5DirFileTables(const DWARFDataExtractor &DebugLineData,
                      uint32_t *OffsetPtr, uint64_t EndPrologueOffset,
                      const DWARFFormParams &FormParams, const DWARFUnit *U,
-                     std::vector<StringRef> &IncludeDirectories,
+                     bool &HasMD5, std::vector<StringRef> &IncludeDirectories,
                      std::vector<DWARFDebugLine::FileNameEntry> &FileNames) {
   // Get the directory entry description.
   ContentDescriptors DirDescriptors =
-    parseV5EntryFormat(DebugLineData, OffsetPtr, EndPrologueOffset);
+      parseV5EntryFormat(DebugLineData, OffsetPtr, EndPrologueOffset, nullptr);
   if (DirDescriptors.empty())
     return false;
 
@@ -175,7 +188,7 @@ parseV5DirFileTables(const DWARFDataExtractor &DebugLineData,
 
   // Get the file entry description.
   ContentDescriptors FileDescriptors =
-    parseV5EntryFormat(DebugLineData, OffsetPtr, EndPrologueOffset);
+      parseV5EntryFormat(DebugLineData, OffsetPtr, EndPrologueOffset, &HasMD5);
   if (FileDescriptors.empty())
     return false;
 
@@ -202,7 +215,11 @@ parseV5DirFileTables(const DWARFDataExtractor &DebugLineData,
       case DW_LNCT_size:
         FileEntry.Length = Value.getAsUnsignedConstant().getValue();
         break;
-      // FIXME: Add MD5
+      case DW_LNCT_MD5:
+        assert(Value.getAsBlock().getValue().size() == 16);
+        std::uninitialized_copy_n(Value.getAsBlock().getValue().begin(), 16,
+                                  FileEntry.Checksum.Bytes.begin());
+        break;
       default:
         break;
       }
@@ -254,7 +271,7 @@ bool DWARFDebugLine::Prologue::parse(const DWARFDataExtractor &DebugLineData,
 
   if (getVersion() >= 5) {
     if (!parseV5DirFileTables(DebugLineData, OffsetPtr, EndPrologueOffset,
-                              getFormParams(), U, IncludeDirectories,
+                              FormParams, U, HasMD5, IncludeDirectories,
                               FileNames)) {
       fprintf(stderr,
               "warning: parsing line table prologue at 0x%8.8" PRIx64

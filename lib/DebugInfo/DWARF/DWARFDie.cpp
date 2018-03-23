@@ -62,13 +62,11 @@ static void dumpRanges(const DWARFObject &Obj, raw_ostream &OS,
   if (DumpOpts.Verbose)
     SectionNames = Obj.getSectionNames();
 
-  for (size_t I = 0; I < Ranges.size(); ++I) {
-    const DWARFAddressRange &R = Ranges[I];
+  for (const DWARFAddressRange &R : Ranges) {
 
     OS << '\n';
     OS.indent(Indent);
-    OS << format("[0x%0*" PRIx64 " - 0x%0*" PRIx64 ")", AddressSize * 2,
-                 R.LowPC, AddressSize * 2, R.HighPC);
+    R.dump(OS, AddressSize);
 
     if (SectionNames.empty() || R.SectionIndex == -1ULL)
       continue;
@@ -236,12 +234,14 @@ static void dumpAttribute(raw_ostream &OS, const DWARFDie &Die,
     OS << *formValue.getAsUnsignedConstant();
   else if (Attr == DW_AT_high_pc && !DumpOpts.ShowForm && !DumpOpts.Verbose &&
            formValue.getAsUnsignedConstant()) {
-    // Print the actual address rather than the offset.
-    uint64_t LowPC, HighPC, Index;
-    if (Die.getLowAndHighPC(LowPC, HighPC, Index))
-      OS << format("0x%016" PRIx64, HighPC);
-    else
-      formValue.dump(OS, DumpOpts);
+    if (DumpOpts.ShowAddresses) {
+      // Print the actual address rather than the offset.
+      uint64_t LowPC, HighPC, Index;
+      if (Die.getLowAndHighPC(LowPC, HighPC, Index))
+        OS << format("0x%016" PRIx64, HighPC);
+      else
+        formValue.dump(OS, DumpOpts);
+    }
   } else if (Attr == DW_AT_location || Attr == DW_AT_frame_base ||
              Attr == DW_AT_data_member_location ||
              Attr == DW_AT_GNU_call_site_value)
@@ -458,7 +458,8 @@ void DWARFDie::dump(raw_ostream &OS, unsigned Indent,
 
   if (debug_info_data.isValidOffset(offset)) {
     uint32_t abbrCode = debug_info_data.getULEB128(&offset);
-    WithColor(OS, syntax::Address).get() << format("\n0x%8.8x: ", Offset);
+    if (DumpOpts.ShowAddresses)
+      WithColor(OS, syntax::Address).get() << format("\n0x%8.8x: ", Offset);
 
     if (abbrCode) {
       auto AbbrevDecl = getAbbreviationDeclarationPtr();
@@ -488,7 +489,7 @@ void DWARFDie::dump(raw_ostream &OS, unsigned Indent,
         }
 
         DWARFDie child = getFirstChild();
-        if (DumpOpts.RecurseDepth > 0 && child) {
+        if (DumpOpts.ShowChildren && DumpOpts.RecurseDepth > 0 && child) {
           DumpOpts.RecurseDepth--;
           while (child) {
             child.dump(OS, Indent + 2, DumpOpts);

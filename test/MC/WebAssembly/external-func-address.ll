@@ -17,7 +17,11 @@ declare void @f1(i32) #1
 ; CHECK-NEXT:           - I32
 ; CHECK:        - Type:            IMPORT
 ; CHECK-NEXT:     Imports:
-; CHECK-NEXT:       - Module:          env
+; CHECK:            - Module:          env
+; CHECK-NEXT:         Field:           __linear_memory
+; CHECK:            - Module:          env
+; CHECK-NEXT:         Field:           __indirect_function_table
+; CHECK:            - Module:          env
 ; CHECK-NEXT:         Field:           f1
 ; CHECK-NEXT:         Kind:            FUNCTION
 ; CHECK-NEXT:         SigIndex:        0
@@ -25,10 +29,10 @@ declare void @f1(i32) #1
 ; CHECK-NEXT:     Segments:
 ; CHECK-NEXT:       - Offset:
 ; CHECK-NEXT:           Opcode:          I32_CONST
-; CHECK-NEXT:           Value:           0
+; CHECK-NEXT:           Value:           1
 ; CHECK-NEXT:         Functions:       [ 0 ]
 ; CHECK:        - Type:            DATA
 ; CHECK-NEXT:     Relocations:
 ; CHECK-NEXT:       - Type:            R_WEBASSEMBLY_TABLE_INDEX_I32
-; CHECK-NEXT:         Index:           0
+; CHECK-NEXT:         Index:           1
 ; CHECK-NEXT:         Offset:          0x00000006

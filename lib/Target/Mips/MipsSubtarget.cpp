@@ -57,6 +57,10 @@ static cl::opt<bool>
     GPOpt("mgpopt", cl::Hidden,
           cl::desc("Enable gp-relative addressing of mips small data items"));
 
+bool MipsSubtarget::DspWarningPrinted = false;
+
+bool MipsSubtarget::MSAWarningPrinted = false;
+
 void MipsSubtarget::anchor() {}
 
 MipsSubtarget::MipsSubtarget(const Triple &TT, StringRef CPU, StringRef FS,
@@ -104,6 +108,9 @@ MipsSubtarget::MipsSubtarget(const Triple &TT, StringRef CPU, StringRef FS,
   if (IsFPXX && (isABI_N32() || isABI_N64()))
     report_fatal_error("FPXX is not permitted for the N32/N64 ABI's.", false);
 
+  if (hasMips64r6() && InMicroMipsMode)
+    report_fatal_error("microMIPS64R6 is not supported", false);
+
   if (hasMips32r6()) {
     StringRef ISA = hasMips64r6() ? "MIPS64r6" : "MIPS32r6";
 
@@ -125,6 +132,40 @@ MipsSubtarget::MipsSubtarget(const Triple &TT, StringRef CPU, StringRef FS,
     errs() << "warning: cannot use small-data accesses for '-mabicalls'"
            << "\n";
     UseSmallSection = false;
+  }
+
+  if (hasDSPR2() && !DspWarningPrinted) {
+    if (hasMips64() && !hasMips64r2()) {
+      errs() << "warning: the 'dspr2' ASE requires MIPS64 revision 2 or "
+             << "greater\n";
+      DspWarningPrinted = true;
+    } else if (hasMips32() && !hasMips32r2()) {
+      errs() << "warning: the 'dspr2' ASE requires MIPS32 revision 2 or "
+             << "greater\n";
+      DspWarningPrinted = true;
+    }
+  } else if (hasDSP() && !DspWarningPrinted) {
+    if (hasMips64() && !hasMips64r2()) {
+      errs() << "warning: the 'dsp' ASE requires MIPS64 revision 2 or "
+             << "greater\n";
+      DspWarningPrinted = true;
+    } else if (hasMips32() && !hasMips32r2()) {
+      errs() << "warning: the 'dsp' ASE requires MIPS32 revision 2 or "
+             << "greater\n";
+      DspWarningPrinted = true;
+    }
+  }
+
+  if (hasMSA() && !MSAWarningPrinted) {
+    if (hasMips64() && !hasMips64r5()) {
+      errs() << "warning: the 'msa' ASE requires MIPS64 revision 5 or "
+             << "greater\n";
+      MSAWarningPrinted = true;
+    } else if (hasMips32() && !hasMips32r5()) {
+      errs() << "warning: the 'msa' ASE requires MIPS32 revision 5 or "
+             << "greater\n";
+      MSAWarningPrinted = true;
+    }
   }
 }
 

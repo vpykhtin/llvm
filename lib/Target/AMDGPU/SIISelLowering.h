@@ -60,6 +60,10 @@ class SITargetLowering final : public AMDGPUTargetLowering {
   SDValue LowerATOMIC_CMP_SWAP(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerBRCOND(SDValue Op, SelectionDAG &DAG) const;
 
+  SDValue lowerIntrinsicWChain_IllegalReturnType(SDValue Op, SDValue &Chain,
+                                                 SelectionDAG &DAG) const;
+  SDValue handleD16VData(SDValue VData, SelectionDAG &DAG) const;
+
   /// \brief Converts \p Op, which must be of floating point type, to the
   /// floating point type \p VT, by either extending or truncating it.
   SDValue getFPExtOrFPTrunc(SelectionDAG &DAG,
@@ -82,7 +86,7 @@ class SITargetLowering final : public AMDGPUTargetLowering {
   SDValue lowerEXTRACT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerTRAP(SDValue Op, SelectionDAG &DAG) const;
 
-  void adjustWritemask(MachineSDNode *&N, SelectionDAG &DAG) const;
+  SDNode *adjustWritemask(MachineSDNode *&N, SelectionDAG &DAG) const;
 
   SDValue performUCharToFloatCombine(SDNode *N,
                                      DAGCombinerInfo &DCI) const;
@@ -152,6 +156,7 @@ public:
   bool isShuffleMaskLegal(ArrayRef<int> /*Mask*/, EVT /*VT*/) const override;
 
   bool getTgtMemIntrinsic(IntrinsicInfo &, const CallInst &,
+                          MachineFunction &MF,
                           unsigned IntrinsicID) const override;
 
   bool getAddrModeArguments(IntrinsicInst * /*I*/,

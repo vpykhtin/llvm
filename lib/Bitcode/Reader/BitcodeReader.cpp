@@ -1156,6 +1156,7 @@ static uint64_t getRawAttributeMask(Attribute::AttrKind Val) {
   case Attribute::WriteOnly:       return 1ULL << 53;
   case Attribute::Speculatable:    return 1ULL << 54;
   case Attribute::StrictFP:        return 1ULL << 55;
+  case Attribute::SanitizeHWAddress: return 1ULL << 56;
   case Attribute::Dereferenceable:
     llvm_unreachable("dereferenceable attribute not supported in raw format");
     break;
@@ -1368,6 +1369,8 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::StructRet;
   case bitc::ATTR_KIND_SANITIZE_ADDRESS:
     return Attribute::SanitizeAddress;
+  case bitc::ATTR_KIND_SANITIZE_HWADDRESS:
+    return Attribute::SanitizeHWAddress;
   case bitc::ATTR_KIND_SANITIZE_THREAD:
     return Attribute::SanitizeThread;
   case bitc::ATTR_KIND_SANITIZE_MEMORY:
@@ -3051,14 +3054,17 @@ Error BitcodeReader::parseGlobalIndirectSymbolRecord(
       // FIXME: Change to an error if non-default in 4.0.
       NewGA->setVisibility(getDecodedVisibility(Record[VisInd]));
   }
-  if (OpNum != Record.size())
-    NewGA->setDLLStorageClass(getDecodedDLLStorageClass(Record[OpNum++]));
-  else
-    upgradeDLLImportExportLinkage(NewGA, Linkage);
-  if (OpNum != Record.size())
-    NewGA->setThreadLocalMode(getDecodedThreadLocalMode(Record[OpNum++]));
-  if (OpNum != Record.size())
-    NewGA->setUnnamedAddr(getDecodedUnnamedAddrType(Record[OpNum++]));
+  if (BitCode == bitc::MODULE_CODE_ALIAS ||
+      BitCode == bitc::MODULE_CODE_ALIAS_OLD) {
+    if (OpNum != Record.size())
+      NewGA->setDLLStorageClass(getDecodedDLLStorageClass(Record[OpNum++]));
+    else
+      upgradeDLLImportExportLinkage(NewGA, Linkage);
+    if (OpNum != Record.size())
+      NewGA->setThreadLocalMode(getDecodedThreadLocalMode(Record[OpNum++]));
+    if (OpNum != Record.size())
+      NewGA->setUnnamedAddr(getDecodedUnnamedAddrType(Record[OpNum++]));
+  }
   if (OpNum != Record.size())
     NewGA->setDSOLocal(getDecodedDSOLocal(Record[OpNum++]));
   ValueList.push_back(NewGA);
@@ -4807,8 +4813,12 @@ void ModuleSummaryIndexBitcodeReader::setValueGUID(
   if (PrintSummaryGUIDs)
     dbgs() << "GUID " << ValueGUID << "(" << OriginalNameID << ") is "
            << ValueName << "\n";
-  ValueIdToValueInfoMap[ValueID] =
-      std::make_pair(TheIndex.getOrInsertValueInfo(ValueGUID), OriginalNameID);
+  
+  // UseStrtab is false for legacy summary formats and value names are
+  // created on stack. We can't use them outside of parseValueSymbolTable.
+  ValueIdToValueInfoMap[ValueID] = std::make_pair(
+      TheIndex.getOrInsertValueInfo(ValueGUID, UseStrtab ? ValueName : ""),
+      OriginalNameID);
 }
 
 // Specialized value symbol table parser used when reading module index
@@ -5199,6 +5209,7 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary(unsigned ID) {
       if (!AliaseeInModule)
         return error("Alias expects aliasee summary to be parsed");
       AS->setAliasee(AliaseeInModule);
+      AS->setAliaseeGUID(AliaseeGUID);
 
       auto GUID = getValueInfoFromValueId(ValueID);
       AS->setOriginalName(GUID.second);
@@ -5285,9 +5296,8 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary(unsigned ID) {
           getValueInfoFromValueId(AliaseeValueId).first.getGUID();
       auto AliaseeInModule =
           TheIndex.findSummaryInModule(AliaseeGUID, AS->modulePath());
-      if (!AliaseeInModule)
-        return error("Alias expects aliasee summary to be parsed");
       AS->setAliasee(AliaseeInModule);
+      AS->setAliaseeGUID(AliaseeGUID);
 
       ValueInfo VI = getValueInfoFromValueId(ValueID).first;
       LastSeenGUID = VI.getGUID();
@@ -5673,7 +5683,8 @@ Expected<std::unique_ptr<ModuleSummaryIndex>> BitcodeModule::getSummary() {
   BitstreamCursor Stream(Buffer);
   Stream.JumpToBit(ModuleBit);
 
-  auto Index = llvm::make_unique<ModuleSummaryIndex>();
+  auto Index =
+      llvm::make_unique<ModuleSummaryIndex>(/*IsPerformingAnalysis=*/false);
   ModuleSummaryIndexBitcodeReader R(std::move(Stream), Strtab, *Index,
                                     ModuleIdentifier, 0);
 

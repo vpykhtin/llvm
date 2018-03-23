@@ -306,6 +306,7 @@ public:
                               MachineBasicBlock *MBB) const override;
 
   bool getTgtMemIntrinsic(IntrinsicInfo &Info, const CallInst &I,
+                          MachineFunction &MF,
                           unsigned Intrinsic) const override;
 
   bool isTruncateFree(Type *Ty1, Type *Ty2) const override;
@@ -414,7 +415,7 @@ public:
     // Do not merge to float value size (128 bytes) if no implicit
     // float attribute is set.
 
-    bool NoFloat = DAG.getMachineFunction().getFunction()->hasFnAttribute(
+    bool NoFloat = DAG.getMachineFunction().getFunction().hasFnAttribute(
         Attribute::NoImplicitFloat);
 
     if (NoFloat)
@@ -443,8 +444,8 @@ public:
   }
 
   bool supportSplitCSR(MachineFunction *MF) const override {
-    return MF->getFunction()->getCallingConv() == CallingConv::CXX_FAST_TLS &&
-           MF->getFunction()->hasFnAttribute(Attribute::NoUnwind);
+    return MF->getFunction().getCallingConv() == CallingConv::CXX_FAST_TLS &&
+           MF->getFunction().hasFnAttribute(Attribute::NoUnwind);
   }
   void initializeSplitCSR(MachineBasicBlock *Entry) const override;
   void insertCopiesSplitCSR(
@@ -544,6 +545,7 @@ private:
   SDValue getAddrLarge(NodeTy *N, SelectionDAG &DAG, unsigned Flags = 0) const;
   template <class NodeTy>
   SDValue getAddr(NodeTy *N, SelectionDAG &DAG, unsigned Flags = 0) const;
+  SDValue LowerADDROFRETURNADDR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerGlobalAddress(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerDarwinGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const;
@@ -646,6 +648,8 @@ private:
                           SelectionDAG &DAG) const override;
 
   bool shouldNormalizeToSelectSequence(LLVMContext &, EVT) const override;
+
+  void finalizeLowering(MachineFunction &MF) const override;
 };
 
 namespace AArch64 {

@@ -18,6 +18,7 @@
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileOutputBuffer.h"
+#include "llvm/Support/Path.h"
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -81,6 +82,11 @@ void Section::writeSection(FileOutputBuffer &Out) const {
   std::copy(std::begin(Contents), std::end(Contents), Buf);
 }
 
+void OwnedDataSection::writeSection(FileOutputBuffer &Out) const {
+  uint8_t *Buf = Out.getBufferStart() + Offset;
+  std::copy(std::begin(Data), std::end(Data), Buf);
+}
+
 void StringTableSection::addString(StringRef Name) {
   StrTabBuilder.add(Name);
   Size = StrTabBuilder.getSize();
@@ -136,7 +142,8 @@ uint16_t Symbol::getShndx() const {
 
 void SymbolTableSection::addSymbol(StringRef Name, uint8_t Bind, uint8_t Type,
                                    SectionBase *DefinedIn, uint64_t Value,
-                                   uint16_t Shndx, uint64_t Sz) {
+                                   uint8_t Visibility, uint16_t Shndx,
+                                   uint64_t Sz) {
   Symbol Sym;
   Sym.Name = Name;
   Sym.Binding = Bind;
@@ -149,6 +156,7 @@ void SymbolTableSection::addSymbol(StringRef Name, uint8_t Bind, uint8_t Type,
       Sym.ShndxType = SYMBOL_SIMPLE_INDEX;
   }
   Sym.Value = Value;
+  Sym.Visibility = Visibility;
   Sym.Size = Sz;
   Sym.Index = Symbols.size();
   Symbols.emplace_back(llvm::make_unique<Symbol>(Sym));
@@ -166,6 +174,25 @@ void SymbolTableSection::removeSectionReferences(const SectionBase *Sec) {
                      [=](const SymPtr &Sym) { return Sym->DefinedIn == Sec; });
   Size -= (std::end(Symbols) - Iter) * this->EntrySize;
   Symbols.erase(Iter, std::end(Symbols));
+}
+
+void SymbolTableSection::localize(
+    std::function<bool(const Symbol &)> ToLocalize) {
+  for (const auto &Sym : Symbols) {
+    if (ToLocalize(*Sym))
+      Sym->Binding = STB_LOCAL;
+  }
+
+  // Now that the local symbols aren't grouped at the start we have to reorder
+  // the symbols to respect this property.
+  std::stable_partition(
+      std::begin(Symbols), std::end(Symbols),
+      [](const SymPtr &Sym) { return Sym->Binding == STB_LOCAL; });
+
+  // Lastly we fix the symbol indexes.
+  uint32_t Index = 0;
+  for (auto &Sym : Symbols)
+    Sym->Index = Index++;
 }
 
 void SymbolTableSection::initialize(SectionTableRef SecTable) {
@@ -216,6 +243,7 @@ void SymbolTableSectionImpl<ELFT>::writeSection(FileOutputBuffer &Out) const {
     Sym->st_name = Symbol->NameIndex;
     Sym->st_value = Symbol->Value;
     Sym->st_size = Symbol->Size;
+    Sym->st_other = Symbol->Visibility;
     Sym->setBinding(Symbol->Binding);
     Sym->setType(Symbol->Type);
     Sym->st_shndx = Symbol->getShndx();
@@ -227,10 +255,9 @@ template <class SymTabType>
 void RelocSectionWithSymtabBase<SymTabType>::removeSectionReferences(
     const SectionBase *Sec) {
   if (Symbols == Sec) {
-    error("Symbol table " + Symbols->Name +
-          " cannot be removed because it is "
-          "referenced by the relocation "
-          "section " +
+    error("Symbol table " + Symbols->Name + " cannot be removed because it is "
+                                            "referenced by the relocation "
+                                            "section " +
           this->Name);
   }
 }
@@ -245,9 +272,9 @@ void RelocSectionWithSymtabBase<SymTabType>::initialize(
           " is not a symbol table"));
 
   if (Info != SHN_UNDEF)
-    setSection(SecTable.getSection(Info, "Info field value " + Twine(Info) +
-                                             " in section " + Name +
-                                             " is invalid"));
+    setSection(SecTable.getSection(Info,
+                                   "Info field value " + Twine(Info) +
+                                       " in section " + Name + " is invalid"));
   else
     setSection(nullptr);
 }
@@ -294,9 +321,8 @@ void DynamicRelocationSection::writeSection(FileOutputBuffer &Out) const {
 
 void SectionWithStrTab::removeSectionReferences(const SectionBase *Sec) {
   if (StrTab == Sec) {
-    error("String table " + StrTab->Name +
-          " cannot be removed because it is "
-          "referenced by the section " +
+    error("String table " + StrTab->Name + " cannot be removed because it is "
+                                           "referenced by the section " +
           this->Name);
   }
 }
@@ -306,9 +332,9 @@ bool SectionWithStrTab::classof(const SectionBase *S) {
 }
 
 void SectionWithStrTab::initialize(SectionTableRef SecTable) {
-  auto StrTab =
-      SecTable.getSection(Link, "Link field value " + Twine(Link) +
-                                    " in section " + Name + " is invalid");
+  auto StrTab = SecTable.getSection(Link,
+                                    "Link field value " + Twine(Link) +
+                                        " in section " + Name + " is invalid");
   if (StrTab->Type != SHT_STRTAB) {
     error("Link field value " + Twine(Link) + " in section " + Name +
           " is not a string table");
@@ -317,6 +343,50 @@ void SectionWithStrTab::initialize(SectionTableRef SecTable) {
 }
 
 void SectionWithStrTab::finalize() { this->Link = StrTab->Index; }
+
+template <class ELFT>
+void GnuDebugLinkSection<ELFT>::init(StringRef File, StringRef Data) {
+  FileName = sys::path::stem(File);
+  // The format for the .gnu_debuglink starts with the stemmed file name and is
+  // followed by a null terminator and then the CRC32 of the file. The CRC32
+  // should be 4 byte aligned. So we add the FileName size, a 1 for the null
+  // byte, and then finally push the size to alignment and add 4.
+  Size = alignTo(FileName.size() + 1, 4) + 4;
+  // The CRC32 will only be aligned if we align the whole section.
+  Align = 4;
+  Type = ELF::SHT_PROGBITS;
+  Name = ".gnu_debuglink";
+  // For sections not found in segments, OriginalOffset is only used to
+  // establish the order that sections should go in. By using the maximum
+  // possible offset we cause this section to wind up at the end.
+  OriginalOffset = std::numeric_limits<uint64_t>::max();
+  JamCRC crc;
+  crc.update(ArrayRef<char>(Data.data(), Data.size()));
+  // The CRC32 value needs to be complemented because the JamCRC dosn't
+  // finalize the CRC32 value. It also dosn't negate the initial CRC32 value
+  // but it starts by default at 0xFFFFFFFF which is the complement of zero.
+  CRC32 = ~crc.getCRC();
+}
+
+template <class ELFT>
+GnuDebugLinkSection<ELFT>::GnuDebugLinkSection(StringRef File)
+    : FileName(File) {
+  // Read in the file to compute the CRC of it.
+  auto DebugOrErr = MemoryBuffer::getFile(File);
+  if (!DebugOrErr)
+    error("'" + File + "': " + DebugOrErr.getError().message());
+  auto Debug = std::move(*DebugOrErr);
+  init(File, Debug->getBuffer());
+}
+
+template <class ELFT>
+void GnuDebugLinkSection<ELFT>::writeSection(FileOutputBuffer &Out) const {
+  auto Buf = Out.getBufferStart() + Offset;
+  char *File = reinterpret_cast<char *>(Buf);
+  Elf_Word *CRC = reinterpret_cast<Elf_Word *>(Buf + Size - sizeof(Elf_Word));
+  *CRC = CRC32;
+  std::copy(std::begin(FileName), std::end(FileName), File);
+}
 
 // Returns true IFF a section is wholly inside the range of a segment
 static bool sectionWithinSegment(const SectionBase &Section,
@@ -339,12 +409,20 @@ static bool segmentOverlapsSegment(const Segment &Child,
          Parent.OriginalOffset + Parent.FileSize > Child.OriginalOffset;
 }
 
-static bool compareSegments(const Segment *A, const Segment *B) {
+static bool compareSegmentsByOffset(const Segment *A, const Segment *B) {
   // Any segment without a parent segment should come before a segment
   // that has a parent segment.
   if (A->OriginalOffset < B->OriginalOffset)
     return true;
   if (A->OriginalOffset > B->OriginalOffset)
+    return false;
+  return A->Index < B->Index;
+}
+
+static bool compareSegmentsByPAddr(const Segment *A, const Segment *B) {
+  if (A->PAddr < B->PAddr)
+    return true;
+  if (A->PAddr > B->PAddr)
     return false;
   return A->Index < B->Index;
 }
@@ -386,9 +464,9 @@ void Object<ELFT>::readProgramHeaders(const ELFFile<ELFT> &ElfFile) {
       if (&Child != &Parent && segmentOverlapsSegment(*Child, *Parent)) {
         // We want a canonical "most parental" segment but this requires
         // inspecting the ParentSegment.
-        if (compareSegments(Parent.get(), Child.get()))
+        if (compareSegmentsByOffset(Parent.get(), Child.get()))
           if (Child->ParentSegment == nullptr ||
-              compareSegments(Parent.get(), Child->ParentSegment)) {
+              compareSegmentsByOffset(Parent.get(), Child->ParentSegment)) {
             Child->ParentSegment = Parent.get();
           }
       }
@@ -416,13 +494,13 @@ void Object<ELFT>::initSymbolTable(const object::ELFFile<ELFT> &ElfFile,
       }
     } else if (Sym.st_shndx != SHN_UNDEF) {
       DefSection = SecTable.getSection(
-          Sym.st_shndx, "Symbol '" + Name +
-                            "' is defined in invalid section with index " +
-                            Twine(Sym.st_shndx));
+          Sym.st_shndx,
+          "Symbol '" + Name + "' is defined in invalid section with index " +
+              Twine(Sym.st_shndx));
     }
 
     SymTab->addSymbol(Name, Sym.getBinding(), Sym.getType(), DefSection,
-                      Sym.getValue(), Sym.st_shndx, Sym.st_size);
+                      Sym.getValue(), Sym.st_other, Sym.st_shndx, Sym.st_size);
   }
 }
 
@@ -678,6 +756,17 @@ void Object<ELFT>::removeSections(
   Sections.erase(Iter, std::end(Sections));
 }
 
+template <class ELFT>
+void Object<ELFT>::addSection(StringRef SecName, ArrayRef<uint8_t> Data) {
+  auto Sec = llvm::make_unique<OwnedDataSection>(SecName, Data);
+  Sec->OriginalOffset = ~0ULL;
+  Sections.push_back(std::move(Sec));
+}
+
+template <class ELFT> void Object<ELFT>::addGnuDebugLink(StringRef File) {
+  Sections.emplace_back(llvm::make_unique<GnuDebugLinkSection<ELFT>>(File));
+}
+
 template <class ELFT> void ELFObject<ELFT>::sortSections() {
   // Put all sections in offset order. Maintain the ordering as closely as
   // possible while meeting that demand however.
@@ -703,7 +792,8 @@ static uint64_t alignToAddr(uint64_t Offset, uint64_t Addr, uint64_t Align) {
 
 // Orders segments such that if x = y->ParentSegment then y comes before x.
 static void OrderSegments(std::vector<Segment *> &Segments) {
-  std::stable_sort(std::begin(Segments), std::end(Segments), compareSegments);
+  std::stable_sort(std::begin(Segments), std::end(Segments),
+                   compareSegmentsByOffset);
 }
 
 // This function finds a consistent layout for a list of segments starting from
@@ -712,7 +802,7 @@ static void OrderSegments(std::vector<Segment *> &Segments) {
 static uint64_t LayoutSegments(std::vector<Segment *> &Segments,
                                uint64_t Offset) {
   assert(std::is_sorted(std::begin(Segments), std::end(Segments),
-                        compareSegments));
+                        compareSegmentsByOffset));
   // The only way a segment should move is if a section was between two
   // segments and that section was removed. If that section isn't in a segment
   // then it's acceptable, but not ideal, to simply move it to after the
@@ -866,13 +956,28 @@ template <class ELFT> void BinaryObject<ELFT>::finalize() {
       OrderedSegments.push_back(Section->ParentSegment);
     }
   }
-  OrderSegments(OrderedSegments);
+
+  // For binary output, we're going to use physical addresses instead of
+  // virtual addresses, since a binary output is used for cases like ROM
+  // loading and physical addresses are intended for ROM loading.
+  // However, if no segment has a physical address, we'll fallback to using
+  // virtual addresses for all.
+  if (std::all_of(std::begin(OrderedSegments), std::end(OrderedSegments),
+                  [](const Segment *Segment) { return Segment->PAddr == 0; }))
+    for (const auto &Segment : OrderedSegments)
+      Segment->PAddr = Segment->VAddr;
+
+  std::stable_sort(std::begin(OrderedSegments), std::end(OrderedSegments),
+                   compareSegmentsByPAddr);
+
   // Because we add a ParentSegment for each section we might have duplicate
   // segments in OrderedSegments. If there were duplicates then LayoutSegments
   // would do very strange things.
   auto End =
       std::unique(std::begin(OrderedSegments), std::end(OrderedSegments));
   OrderedSegments.erase(End, std::end(OrderedSegments));
+
+  uint64_t Offset = 0;
 
   // Modify the first segment so that there is no gap at the start. This allows
   // our layout algorithm to proceed as expected while not out writing out the
@@ -882,18 +987,17 @@ template <class ELFT> void BinaryObject<ELFT>::finalize() {
     auto Sec = Seg->firstSection();
     auto Diff = Sec->OriginalOffset - Seg->OriginalOffset;
     Seg->OriginalOffset += Diff;
-    // The size needs to be shrunk as well
+    // The size needs to be shrunk as well.
     Seg->FileSize -= Diff;
-    Seg->MemSize -= Diff;
-    // The VAddr needs to be adjusted so that the alignment is correct as well
-    Seg->VAddr += Diff;
-    Seg->PAddr = Seg->VAddr;
-    // We don't want this to be shifted by alignment so we need to set the
-    // alignment to zero.
-    Seg->Align = 0;
+    // The PAddr needs to be increased to remove the gap before the first
+    // section.
+    Seg->PAddr += Diff;
+    uint64_t LowestPAddr = Seg->PAddr;
+    for (auto &Segment : OrderedSegments) {
+      Segment->Offset = Segment->PAddr - LowestPAddr;
+      Offset = std::max(Offset, Segment->Offset + Segment->FileSize);
+    }
   }
-
-  uint64_t Offset = LayoutSegments(OrderedSegments, 0);
 
   // TODO: generalize LayoutSections to take a range. Pass a special range
   // constructed from an iterator that skips values for which a predicate does

@@ -2031,6 +2031,18 @@ TEST_F(DIExpressionTest, get) {
 
   TempDIExpression Temp = N->clone();
   EXPECT_EQ(N, MDNode::replaceWithUniqued(std::move(Temp)));
+
+  // Test DIExpression::prepend().
+  uint64_t Elts0[] = {dwarf::DW_OP_LLVM_fragment, 0, 32};
+  auto *N0 = DIExpression::get(Context, Elts0);
+  N0 = DIExpression::prepend(N0, true, 64, true, true);
+  uint64_t Elts1[] = {dwarf::DW_OP_deref,
+                      dwarf::DW_OP_plus_uconst, 64,
+                      dwarf::DW_OP_deref,
+                      dwarf::DW_OP_stack_value,
+                      dwarf::DW_OP_LLVM_fragment, 0, 32};
+  auto *N1 = DIExpression::get(Context, Elts1);
+  EXPECT_EQ(N0, N1);
 }
 
 TEST_F(DIExpressionTest, isValid) {
@@ -2424,9 +2436,20 @@ TEST_F(FunctionAttachmentTest, Verifier) {
 TEST_F(FunctionAttachmentTest, EntryCount) {
   Function *F = getFunction("foo");
   EXPECT_FALSE(F->getEntryCount().hasValue());
-  F->setEntryCount(12304);
-  EXPECT_TRUE(F->getEntryCount().hasValue());
-  EXPECT_EQ(12304u, *F->getEntryCount());
+  F->setEntryCount(12304, Function::PCT_Real);
+  auto Count = F->getEntryCount();
+  EXPECT_TRUE(Count.hasValue());
+  EXPECT_EQ(12304u, Count.getCount());
+  EXPECT_EQ(Function::PCT_Real, Count.getType());
+
+  // Repeat the same for synthetic counts.
+  F = getFunction("bar");
+  EXPECT_FALSE(F->getEntryCount().hasValue());
+  F->setEntryCount(123, Function::PCT_Synthetic);
+  Count = F->getEntryCount();
+  EXPECT_TRUE(Count.hasValue());
+  EXPECT_EQ(123u, Count.getCount());
+  EXPECT_EQ(Function::PCT_Synthetic, Count.getType());
 }
 
 TEST_F(FunctionAttachmentTest, SubprogramAttachment) {

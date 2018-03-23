@@ -18,6 +18,8 @@ class MCSymbolWasm : public MCSymbol {
 private:
   bool IsFunction = false;
   bool IsWeak = false;
+  bool IsHidden = false;
+  bool IsComdat = false;
   std::string ModuleName;
   SmallVector<wasm::ValType, 1> Returns;
   SmallVector<wasm::ValType, 4> Params;
@@ -44,6 +46,12 @@ public:
 
   bool isWeak() const { return IsWeak; }
   void setWeak(bool isWeak) { IsWeak = isWeak; }
+
+  bool isHidden() const { return IsHidden; }
+  void setHidden(bool isHidden) { IsHidden = isHidden; }
+
+  bool isComdat() const { return IsComdat; }
+  void setComdat(bool isComdat) { IsComdat = isComdat; }
 
   const StringRef getModuleName() const { return ModuleName; }
 

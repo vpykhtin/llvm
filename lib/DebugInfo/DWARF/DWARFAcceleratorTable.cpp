@@ -11,7 +11,6 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/BinaryFormat/Dwarf.h"
-#include "llvm/DebugInfo/DWARF/DWARFContext.h"
 #include "llvm/DebugInfo/DWARF/DWARFRelocMap.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Format.h"
@@ -22,12 +21,13 @@
 
 using namespace llvm;
 
-bool DWARFAcceleratorTable::extract() {
+llvm::Error AppleAcceleratorTable::extract() {
   uint32_t Offset = 0;
 
   // Check that we can at least read the header.
   if (!AccelSection.isValidOffset(offsetof(Header, HeaderDataLength)+4))
-    return false;
+    return make_error<StringError>("Section too small: cannot read header.",
+                                   inconvertibleErrorCode());
 
   Hdr.Magic = AccelSection.getU32(&Offset);
   Hdr.Version = AccelSection.getU16(&Offset);
@@ -38,9 +38,13 @@ bool DWARFAcceleratorTable::extract() {
 
   // Check that we can read all the hashes and offsets from the
   // section (see SourceLevelDebugging.rst for the structure of the index).
+  // We need to substract one because we're checking for an *offset* which is
+  // equal to the size for an empty table and hence pointer after the section.
   if (!AccelSection.isValidOffset(sizeof(Hdr) + Hdr.HeaderDataLength +
-                                  Hdr.NumBuckets*4 + Hdr.NumHashes*8))
-    return false;
+                                  Hdr.NumBuckets * 4 + Hdr.NumHashes * 8 - 1))
+    return make_error<StringError>(
+        "Section too small: cannot read buckets and hashes.",
+        inconvertibleErrorCode());
 
   HdrData.DIEOffsetBase = AccelSection.getU32(&Offset);
   uint32_t NumAtoms = AccelSection.getU32(&Offset);
@@ -52,23 +56,23 @@ bool DWARFAcceleratorTable::extract() {
   }
 
   IsValid = true;
-  return true;
+  return Error::success();
 }
 
-uint32_t DWARFAcceleratorTable::getNumBuckets() { return Hdr.NumBuckets; }
-uint32_t DWARFAcceleratorTable::getNumHashes() { return Hdr.NumHashes; }
-uint32_t DWARFAcceleratorTable::getSizeHdr() { return sizeof(Hdr); }
-uint32_t DWARFAcceleratorTable::getHeaderDataLength() {
+uint32_t AppleAcceleratorTable::getNumBuckets() { return Hdr.NumBuckets; }
+uint32_t AppleAcceleratorTable::getNumHashes() { return Hdr.NumHashes; }
+uint32_t AppleAcceleratorTable::getSizeHdr() { return sizeof(Hdr); }
+uint32_t AppleAcceleratorTable::getHeaderDataLength() {
   return Hdr.HeaderDataLength;
 }
 
-ArrayRef<std::pair<DWARFAcceleratorTable::HeaderData::AtomType,
-                   DWARFAcceleratorTable::HeaderData::Form>>
-DWARFAcceleratorTable::getAtomsDesc() {
+ArrayRef<std::pair<AppleAcceleratorTable::HeaderData::AtomType,
+                   AppleAcceleratorTable::HeaderData::Form>>
+AppleAcceleratorTable::getAtomsDesc() {
   return HdrData.Atoms;
 }
 
-bool DWARFAcceleratorTable::validateForms() {
+bool AppleAcceleratorTable::validateForms() {
   for (auto Atom : getAtomsDesc()) {
     DWARFFormValue FormValue(Atom.second);
     switch (Atom.first) {
@@ -79,6 +83,7 @@ bool DWARFAcceleratorTable::validateForms() {
            !FormValue.isFormClass(DWARFFormValue::FC_Flag)) ||
           FormValue.getForm() == dwarf::DW_FORM_sdata)
         return false;
+      break;
     default:
       break;
     }
@@ -87,7 +92,7 @@ bool DWARFAcceleratorTable::validateForms() {
 }
 
 std::pair<uint32_t, dwarf::Tag>
-DWARFAcceleratorTable::readAtoms(uint32_t &HashDataOffset) {
+AppleAcceleratorTable::readAtoms(uint32_t &HashDataOffset) {
   uint32_t DieOffset = dwarf::DW_INVALID_OFFSET;
   dwarf::Tag DieTag = dwarf::DW_TAG_null;
   DWARFFormParams FormParams = {Hdr.Version, 0, dwarf::DwarfFormat::DWARF32};
@@ -109,7 +114,7 @@ DWARFAcceleratorTable::readAtoms(uint32_t &HashDataOffset) {
   return {DieOffset, DieTag};
 }
 
-LLVM_DUMP_METHOD void DWARFAcceleratorTable::dump(raw_ostream &OS) const {
+LLVM_DUMP_METHOD void AppleAcceleratorTable::dump(raw_ostream &OS) const {
   if (!IsValid)
     return;
 
@@ -196,8 +201,8 @@ LLVM_DUMP_METHOD void DWARFAcceleratorTable::dump(raw_ostream &OS) const {
   }
 }
 
-DWARFAcceleratorTable::ValueIterator::ValueIterator(
-    const DWARFAcceleratorTable &AccelTable, unsigned Offset)
+AppleAcceleratorTable::ValueIterator::ValueIterator(
+    const AppleAcceleratorTable &AccelTable, unsigned Offset)
     : AccelTable(&AccelTable), DataOffset(Offset) {
   if (!AccelTable.AccelSection.isValidOffsetForDataOfSize(DataOffset, 4))
     return;
@@ -210,7 +215,7 @@ DWARFAcceleratorTable::ValueIterator::ValueIterator(
   Next();
 }
 
-void DWARFAcceleratorTable::ValueIterator::Next() {
+void AppleAcceleratorTable::ValueIterator::Next() {
   assert(NumData > 0 && "attempted to increment iterator past the end");
   auto &AccelSection = AccelTable->AccelSection;
   if (Data >= NumData ||
@@ -225,8 +230,8 @@ void DWARFAcceleratorTable::ValueIterator::Next() {
   ++Data;
 }
 
-iterator_range<DWARFAcceleratorTable::ValueIterator>
-DWARFAcceleratorTable::equal_range(StringRef Key) const {
+iterator_range<AppleAcceleratorTable::ValueIterator>
+AppleAcceleratorTable::equal_range(StringRef Key) const {
   if (!IsValid)
     return make_range(ValueIterator(), ValueIterator());
 

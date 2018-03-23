@@ -715,6 +715,13 @@ static bool isValidVisibilityForLinkage(unsigned V, unsigned L) {
          (GlobalValue::VisibilityTypes)V == GlobalValue::DefaultVisibility;
 }
 
+// If there was an explicit dso_local, update GV. In the absence of an explicit
+// dso_local we keep the default value.
+static void maybeSetDSOLocal(bool DSOLocal, GlobalValue &GV) {
+  if (DSOLocal)
+    GV.setDSOLocal(true);
+}
+
 /// parseIndirectSymbol:
 ///   ::= GlobalVar '=' OptionalLinkage OptionalPreemptionSpecifier 
 ///                     OptionalVisibility OptionalDLLStorageClass
@@ -748,11 +755,6 @@ bool LLParser::parseIndirectSymbol(const std::string &Name, LocTy NameLoc,
   if (!isValidVisibilityForLinkage(Visibility, L))
     return Error(NameLoc,
                  "symbol with local linkage must have default visibility");
-
-  if (DSOLocal && !IsAlias) {
-    return Error(NameLoc,
-                 "dso_local is invalid on ifunc");
-  }
 
   Type *Ty;
   LocTy ExplicitTypeLoc = Lex.getLoc();
@@ -826,7 +828,7 @@ bool LLParser::parseIndirectSymbol(const std::string &Name, LocTy NameLoc,
   GA->setVisibility((GlobalValue::VisibilityTypes)Visibility);
   GA->setDLLStorageClass((GlobalValue::DLLStorageClassTypes)DLLStorageClass);
   GA->setUnnamedAddr(UnnamedAddr);
-  GA->setDSOLocal(DSOLocal);
+  maybeSetDSOLocal(DSOLocal, *GA);
 
   if (Name.empty())
     NumberedVals.push_back(GA.get());
@@ -947,7 +949,7 @@ bool LLParser::ParseGlobal(const std::string &Name, LocTy NameLoc,
     GV->setInitializer(Init);
   GV->setConstant(IsConstant);
   GV->setLinkage((GlobalValue::LinkageTypes)Linkage);
-  GV->setDSOLocal(DSOLocal);
+  maybeSetDSOLocal(DSOLocal, *GV);
   GV->setVisibility((GlobalValue::VisibilityTypes)Visibility);
   GV->setDLLStorageClass((GlobalValue::DLLStorageClassTypes)DLLStorageClass);
   GV->setExternallyInitialized(IsExternallyInitialized);
@@ -1144,6 +1146,8 @@ bool LLParser::ParseFnAttributeValuePairs(AttrBuilder &B,
     case lltok::kw_safestack: B.addAttribute(Attribute::SafeStack); break;
     case lltok::kw_sanitize_address:
       B.addAttribute(Attribute::SanitizeAddress); break;
+    case lltok::kw_sanitize_hwaddress:
+      B.addAttribute(Attribute::SanitizeHWAddress); break;
     case lltok::kw_sanitize_thread:
       B.addAttribute(Attribute::SanitizeThread); break;
     case lltok::kw_sanitize_memory:
@@ -1468,6 +1472,7 @@ bool LLParser::ParseOptionalParamAttrs(AttrBuilder &B) {
     case lltok::kw_optsize:
     case lltok::kw_returns_twice:
     case lltok::kw_sanitize_address:
+    case lltok::kw_sanitize_hwaddress:
     case lltok::kw_sanitize_memory:
     case lltok::kw_sanitize_thread:
     case lltok::kw_ssp:
@@ -1560,6 +1565,7 @@ bool LLParser::ParseOptionalReturnAttrs(AttrBuilder &B) {
     case lltok::kw_optsize:
     case lltok::kw_returns_twice:
     case lltok::kw_sanitize_address:
+    case lltok::kw_sanitize_hwaddress:
     case lltok::kw_sanitize_memory:
     case lltok::kw_sanitize_thread:
     case lltok::kw_ssp:
@@ -4919,7 +4925,7 @@ bool LLParser::ParseFunctionHeader(Function *&Fn, bool isDefine) {
     NumberedVals.push_back(Fn);
 
   Fn->setLinkage((GlobalValue::LinkageTypes)Linkage);
-  Fn->setDSOLocal(DSOLocal);
+  maybeSetDSOLocal(DSOLocal, *Fn);
   Fn->setVisibility((GlobalValue::VisibilityTypes)Visibility);
   Fn->setDLLStorageClass((GlobalValue::DLLStorageClassTypes)DLLStorageClass);
   Fn->setCallingConv(CC);

@@ -519,6 +519,37 @@ void BPFDAGToDAGISel::PreprocessTrunc(SDNode *Node,
   if (!MaskN)
     return;
 
+  // The Reg operand should be a virtual register, which is defined
+  // outside the current basic block. DAG combiner has done a pretty
+  // good job in removing truncating inside a single basic block except
+  // when the Reg operand comes from bpf_load_[byte | half | word] for
+  // which the generic optimizer doesn't understand their results are
+  // zero extended.
+  SDValue BaseV = Node->getOperand(0);
+  if (BaseV.getOpcode() == ISD::INTRINSIC_W_CHAIN) {
+    unsigned IntNo = cast<ConstantSDNode>(BaseV->getOperand(1))->getZExtValue();
+    uint64_t MaskV = MaskN->getZExtValue();
+
+    if (!((IntNo == Intrinsic::bpf_load_byte && MaskV == 0xFF) ||
+          (IntNo == Intrinsic::bpf_load_half && MaskV == 0xFFFF) ||
+          (IntNo == Intrinsic::bpf_load_word && MaskV == 0xFFFFFFFF)))
+      return;
+
+    DEBUG(dbgs() << "Remove the redundant AND operation in: "; Node->dump();
+          dbgs() << '\n');
+
+    I--;
+    CurDAG->ReplaceAllUsesWith(SDValue(Node, 0), BaseV);
+    I++;
+    CurDAG->DeleteNode(Node);
+
+    return;
+  }
+
+  // Multiple basic blocks case.
+  if (BaseV.getOpcode() != ISD::CopyFromReg)
+    return;
+
   unsigned match_load_op = 0;
   switch (MaskN->getZExtValue()) {
   default:
@@ -534,20 +565,12 @@ void BPFDAGToDAGISel::PreprocessTrunc(SDNode *Node,
     break;
   }
 
-  // The Reg operand should be a virtual register, which is defined
-  // outside the current basic block. DAG combiner has done a pretty
-  // good job in removing truncating inside a single basic block.
-  SDValue BaseV = Node->getOperand(0);
-  if (BaseV.getOpcode() != ISD::CopyFromReg)
-    return;
-
   const RegisterSDNode *RegN =
       dyn_cast<RegisterSDNode>(BaseV.getNode()->getOperand(1));
   if (!RegN || !TargetRegisterInfo::isVirtualRegister(RegN->getReg()))
     return;
   unsigned AndOpReg = RegN->getReg();
-  DEBUG(dbgs() << "Examine %vreg" << TargetRegisterInfo::virtReg2Index(AndOpReg)
-               << '\n');
+  DEBUG(dbgs() << "Examine " << printReg(AndOpReg) << '\n');
 
   // Examine the PHI insns in the MachineBasicBlock to found out the
   // definitions of this virtual register. At this stage (DAG2DAG
@@ -574,10 +597,10 @@ void BPFDAGToDAGISel::PreprocessTrunc(SDNode *Node,
       return;
   } else {
     // The PHI node looks like:
-    //   %vreg2<def> = PHI %vreg0, <BB#1>, %vreg1, <BB#3>
-    // Trace each incoming definition, e.g., (%vreg0, BB#1) and (%vreg1, BB#3)
-    // The AND operation can be removed if both %vreg0 in BB#1 and %vreg1 in
-    // BB#3 are defined with with a load matching the MaskN.
+    //   %2 = PHI %0, <%bb.1>, %1, <%bb.3>
+    // Trace each incoming definition, e.g., (%0, %bb.1) and (%1, %bb.3)
+    // The AND operation can be removed if both %0 in %bb.1 and %1 in
+    // %bb.3 are defined with with a load matching the MaskN.
     DEBUG(dbgs() << "Check PHI Insn: "; MII->dump(); dbgs() << '\n');
     unsigned PrevReg = -1;
     for (unsigned i = 0; i < MII->getNumOperands(); ++i) {

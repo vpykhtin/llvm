@@ -706,7 +706,7 @@ void RecognizableInstr::emitDecodePath(DisassemblerTables &tables) const {
 #define MAP(from, to)                     \
   case X86Local::MRM_##from:
 
-  OpcodeType    opcodeType  = (OpcodeType)-1;
+  llvm::Optional<OpcodeType> opcodeType;
 
   ModRMFilter*  filter      = nullptr;
   uint8_t       opcodeToSet = 0;
@@ -786,8 +786,7 @@ void RecognizableInstr::emitDecodePath(DisassemblerTables &tables) const {
   case X86Local::AdSize64: AddressSize = 64; break;
   }
 
-  assert(opcodeType != (OpcodeType)-1 &&
-         "Opcode type not set");
+  assert(opcodeType && "Opcode type not set");
   assert(filter && "Filter not set");
 
   if (Form == X86Local::AddRegFrm) {
@@ -799,12 +798,12 @@ void RecognizableInstr::emitDecodePath(DisassemblerTables &tables) const {
     for (currentOpcode = opcodeToSet;
          currentOpcode < opcodeToSet + 8;
          ++currentOpcode)
-      tables.setTableFields(opcodeType, insnContext(), currentOpcode, *filter,
+      tables.setTableFields(*opcodeType, insnContext(), currentOpcode, *filter,
                             UID, Is32Bit, OpPrefix == 0,
                             IgnoresVEX_L || EncodeRC,
                             VEX_WPrefix == X86Local::VEX_WIG, AddressSize);
   } else {
-    tables.setTableFields(opcodeType, insnContext(), opcodeToSet, *filter, UID,
+    tables.setTableFields(*opcodeType, insnContext(), opcodeToSet, *filter, UID,
                           Is32Bit, OpPrefix == 0, IgnoresVEX_L || EncodeRC,
                           VEX_WPrefix == X86Local::VEX_WIG, AddressSize);
   }
@@ -928,7 +927,6 @@ OperandType RecognizableInstr::typeFromString(const std::string &s,
   TYPE("VK32WM",              TYPE_VK)
   TYPE("VK64",                TYPE_VK)
   TYPE("VK64WM",              TYPE_VK)
-  TYPE("GR32_NOAX",           TYPE_Rv)
   TYPE("vx64mem",             TYPE_MVSIBX)
   TYPE("vx128mem",            TYPE_MVSIBX)
   TYPE("vx256mem",            TYPE_MVSIBX)
@@ -1196,7 +1194,6 @@ RecognizableInstr::opcodeModifierEncodingFromString(const std::string &s,
   ENCODING("GR64",            ENCODING_RO)
   ENCODING("GR16",            ENCODING_Rv)
   ENCODING("GR8",             ENCODING_RB)
-  ENCODING("GR32_NOAX",       ENCODING_Rv)
   errs() << "Unhandled opcode modifier encoding " << s << "\n";
   llvm_unreachable("Unhandled opcode modifier encoding");
 }

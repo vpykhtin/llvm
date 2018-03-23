@@ -104,11 +104,11 @@ namespace llvm {
           NoSignedZerosFPMath(false),
           HonorSignDependentRoundingFPMathOption(false), NoZerosInBSS(false),
           GuaranteedTailCallOpt(false), StackSymbolOrdering(true),
-          EnableFastISel(false), UseInitArray(false),
+          EnableFastISel(false), EnableGlobalISel(false), UseInitArray(false),
           DisableIntegratedAS(false), RelaxELFRelocations(false),
           FunctionSections(false), DataSections(false),
           UniqueSectionNames(true), TrapUnreachable(false), EmulatedTLS(false),
-          EnableIPRA(false) {}
+          EnableIPRA(false), EmitStackSizeSection(false) {}
 
     /// PrintMachineCode - This flag is enabled when the -print-machineinstrs
     /// option is specified on the command line, and should enable debugging
@@ -186,6 +186,9 @@ namespace llvm {
     /// compile time.
     unsigned EnableFastISel : 1;
 
+    /// EnableGlobalISel - This flag enables global instruction selection.
+    unsigned EnableGlobalISel : 1;
+
     /// UseInitArray - Use .init_array instead of .ctors for static
     /// constructors.
     unsigned UseInitArray : 1;
@@ -215,6 +218,9 @@ namespace llvm {
 
     /// This flag enables InterProcedural Register Allocation (IPRA).
     unsigned EnableIPRA : 1;
+
+    /// Emit section containing metadata on function stack sizes.
+    unsigned EmitStackSizeSection : 1;
 
     /// FloatABIType - This setting is set by -float-abi=xxx option is specfied
     /// on the command line. This setting may either be Default, Soft, or Hard.
