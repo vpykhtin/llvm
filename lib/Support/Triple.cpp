@@ -233,7 +233,6 @@ StringRef Triple::getEnvironmentTypeName(EnvironmentType Kind) {
   case Itanium: return "itanium";
   case Cygnus: return "cygnus";
   case CoreCLR: return "coreclr";
-  case OpenCL: return "opencl";
   case Simulator: return "simulator";
   case HCC: return "hcc";
    }
@@ -524,7 +523,6 @@ static Triple::EnvironmentType parseEnvironment(StringRef EnvironmentName) {
     .StartsWith("itanium", Triple::Itanium)
     .StartsWith("cygnus", Triple::Cygnus)
     .StartsWith("coreclr", Triple::CoreCLR)
-    .StartsWith("opencl", Triple::OpenCL)
     .StartsWith("simulator", Triple::Simulator)
     .StartsWith("hcc", Triple::HCC)
     .Default(Triple::UnknownEnvironment);
