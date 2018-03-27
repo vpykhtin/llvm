@@ -252,6 +252,8 @@ public:
 
   bool canMacroFuseCmp() { return false; }
 
+  bool shouldFavorPostInc() const { return false; }
+
   bool isLegalMaskedStore(Type *DataType) { return false; }
 
   bool isLegalMaskedLoad(Type *DataType) { return false; }
@@ -513,6 +515,16 @@ public:
             Callee->getFnAttribute("target-cpu")) &&
            (Caller->getFnAttribute("target-features") ==
             Callee->getFnAttribute("target-features"));
+  }
+
+  bool isIndexedLoadLegal(TTI::MemIndexedMode Mode, Type *Ty,
+                          const DataLayout &DL) const {
+    return false;
+  }
+
+  bool isIndexedStoreLegal(TTI::MemIndexedMode Mode, Type *Ty,
+                           const DataLayout &DL) const {
+    return false;
   }
 
   unsigned getLoadStoreVecRegBitWidth(unsigned AddrSpace) const { return 128; }
