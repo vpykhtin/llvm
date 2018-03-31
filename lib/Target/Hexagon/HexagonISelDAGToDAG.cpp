@@ -1918,13 +1918,13 @@ SDValue HexagonDAGToDAGISel::balanceSubTree(SDNode *N, bool TopLevel) {
 
     DEBUG(dbgs() << "--> No need to balance root (Weight=" << Weight
                  << " Height=" << RootHeights[N] << "): ");
-    DEBUG(N->dump());
+    DEBUG(N->dump(CurDAG));
 
     return SDValue(N, 0);
   }
 
   DEBUG(dbgs() << "** Balancing root node: ");
-  DEBUG(N->dump());
+  DEBUG(N->dump(CurDAG));
 
   unsigned NOpcode = N->getOpcode();
 
@@ -2087,7 +2087,7 @@ SDValue HexagonDAGToDAGISel::balanceSubTree(SDNode *N, bool TopLevel) {
         getTargetLowering()->isOffsetFoldingLegal(GANode)) {
       DEBUG(dbgs() << "--> Combining GA and offset (" << Offset->getSExtValue()
           << "): ");
-      DEBUG(GANode->dump());
+      DEBUG(GANode->dump(CurDAG));
 
       SDValue NewTGA =
         CurDAG->getTargetGlobalAddress(GANode->getGlobal(), SDLoc(GA.Value),
@@ -2250,7 +2250,7 @@ void HexagonDAGToDAGISel::rebalanceAddressTrees() {
       continue;
 
     DEBUG(dbgs() << "** Rebalancing address calculation in node: ");
-    DEBUG(N->dump());
+    DEBUG(N->dump(CurDAG));
 
     // FindRoots
     SmallVector<SDNode *, 4> Worklist;
@@ -2291,7 +2291,7 @@ void HexagonDAGToDAGISel::rebalanceAddressTrees() {
             NewBasePtr, N->getOperand(3));
 
     DEBUG(dbgs() << "--> Final node: ");
-    DEBUG(N->dump());
+    DEBUG(N->dump(CurDAG));
   }
 
   CurDAG->RemoveDeadNodes();
