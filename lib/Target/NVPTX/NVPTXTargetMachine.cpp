@@ -61,6 +61,7 @@ void initializeNVPTXAllocaHoistingPass(PassRegistry &);
 void initializeNVPTXAssignValidGlobalNamesPass(PassRegistry&);
 void initializeNVPTXLowerAggrCopiesPass(PassRegistry &);
 void initializeNVPTXLowerArgsPass(PassRegistry &);
+void initializeNVPTXLowerAllocaPass(PassRegistry &);
 
 } // end namespace llvm
 
@@ -78,6 +79,7 @@ extern "C" void LLVMInitializeNVPTXTarget() {
   initializeNVPTXAllocaHoistingPass(PR);
   initializeNVPTXAssignValidGlobalNamesPass(PR);
   initializeNVPTXLowerArgsPass(PR);
+  initializeNVPTXLowerAllocaPass(PR);
   initializeNVPTXLowerAggrCopiesPass(PR);
 }
 
@@ -204,7 +206,7 @@ void NVPTXPassConfig::addAddressSpaceInferencePasses() {
   // NVPTXLowerArgs emits alloca for byval parameters which can often
   // be eliminated by SROA.
   addPass(createSROAPass());
-  addPass(createLowerAllocaPass());
+  addPass(createNVPTXLowerAllocaPass());
   addPass(createInferAddressSpacesPass());
 }
 

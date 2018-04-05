@@ -117,6 +117,7 @@ struct InstrAspect {
 struct LegalityQuery {
   unsigned Opcode;
   ArrayRef<LLT> Types;
+
   raw_ostream &print(raw_ostream &OS) const;
 };
 

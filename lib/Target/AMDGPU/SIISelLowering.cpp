@@ -310,8 +310,10 @@ SITargetLowering::SITargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::ATOMIC_CMP_SWAP_WITH_SUCCESS, MVT::i32, Expand);
   setOperationAction(ISD::ATOMIC_CMP_SWAP_WITH_SUCCESS, MVT::i64, Expand);
 
-  setOperationAction(ISD::ADDRSPACECAST, MVT::i32, Custom);
-  setOperationAction(ISD::ADDRSPACECAST, MVT::i64, Custom);
+  if (getSubtarget()->hasFlatAddressSpace()) {
+    setOperationAction(ISD::ADDRSPACECAST, MVT::i32, Custom);
+    setOperationAction(ISD::ADDRSPACECAST, MVT::i64, Custom);
+  }
 
   setOperationAction(ISD::BSWAP, MVT::i32, Legal);
   setOperationAction(ISD::BITREVERSE, MVT::i32, Legal);
@@ -745,9 +747,8 @@ bool SITargetLowering::isLegalAddressingMode(const DataLayout &DL,
     // will use a MUBUF load.
     // FIXME?: We also need to do this if unaligned, but we don't know the
     // alignment here.
-    if (Ty->isSized() && DL.getTypeStoreSize(Ty) < 4) {
+    if (DL.getTypeStoreSize(Ty) < 4)
       return isLegalGlobalAddressingMode(AM);
-    }
 
     if (Subtarget->getGeneration() == SISubtarget::SOUTHERN_ISLANDS) {
       // SMRD instructions have an 8-bit, dword offset on SI.
@@ -4053,9 +4054,7 @@ SDValue SITargetLowering::getSegmentAperture(unsigned AS, const SDLoc &DL,
   MachineFunction &MF = DAG.getMachineFunction();
   SIMachineFunctionInfo *Info = MF.getInfo<SIMachineFunctionInfo>();
   unsigned UserSGPR = Info->getQueuePtrUserSGPR();
-  if (UserSGPR == AMDGPU::NoRegister) {
-    return DAG.getConstant(0, DL, MVT::i32);
-  }
+  assert(UserSGPR != AMDGPU::NoRegister);
 
   SDValue QueuePtr = CreateLiveInRegister(
     DAG, &AMDGPU::SReg_64RegClass, UserSGPR, MVT::i64);
@@ -4092,11 +4091,6 @@ SDValue SITargetLowering::lowerADDRSPACECAST(SDValue Op,
 
   // flat -> local/private
   if (ASC->getSrcAddressSpace() == AMDGPUASI.FLAT_ADDRESS) {
-    if (ASC->getDestAddressSpace() == AMDGPUASI.PRIVATE_ADDRESS
-        && Src->getOpcode() == ISD::FrameIndex) {
-      return DAG.getTargetFrameIndex(cast<FrameIndexSDNode>(Src.getNode())->
-          getIndex(), MVT::i32);
-    }
     unsigned DestAS = ASC->getDestAddressSpace();
 
     if (DestAS == AMDGPUASI.LOCAL_ADDRESS ||
