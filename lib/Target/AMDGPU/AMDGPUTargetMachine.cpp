@@ -638,7 +638,7 @@ void AMDGPUPassConfig::addIRPasses() {
 
   if (TM.getOptLevel() > CodeGenOpt::None) {
     // ToDo: Fix it so that it can handle addrspacecast to private
-    //addPass(createAMDGPUPromoteAlloca());
+    addPass(createAMDGPUPromoteAlloca());
     //addPass(createLowerAllocaPass());
     addPass(createInferAddressSpacesPass());
 

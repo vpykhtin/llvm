@@ -1412,6 +1412,7 @@ def : InstRW<[ZnWriteCVSTSI2SIr], (instregex "(V?)CVT(T?)SD2SI(64)?rr")>;
 // r32,m32.
 def : InstRW<[ZnWriteCVSTSI2SILd], (instregex "(V?)CVT(T?)SD2SI(64)?rm")>;
 
+
 // VCVTPS2PH.
 // x,v,i.
 def : InstRW<[WriteMicrocoded], (instregex "VCVTPS2PH(Y?)rr")>;
