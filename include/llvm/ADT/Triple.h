@@ -660,7 +660,8 @@ public:
   }
 
   /// Tests wether the target supports comdat
-  bool supportsCOMDAT() const { return !isOSBinFormatMachO() && !isOSBinFormatWasm() && (getArch() != Triple::amdgcn); }
+  bool supportsCOMDAT() const { return !isOSBinFormatMachO() && 
+                                         getArch() != Triple::amdgcn; }
 
   /// Tests whether the target uses emulated TLS as default.
   bool hasDefaultEmulatedTLS() const {

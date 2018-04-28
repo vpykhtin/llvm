@@ -619,7 +619,6 @@ bool InferAddressSpaces::runOnFunction(Function &F) {
   if (skipFunction(F))
     return false;
 
-  DEBUG(dbgs() << "InferAddressSpace on " << F.getName() << '\n');
   const TargetTransformInfo &TTI =
       getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
   FlatAddrSpace = TTI.getFlatAddressSpace();
