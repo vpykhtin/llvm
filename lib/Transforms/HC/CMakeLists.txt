@@ -1,3 +1,1 @@
-add_subdirectory(DirectFuncCall)
 add_subdirectory(SelectAcceleratorCode)
-add_subdirectory(WrapperGen)
