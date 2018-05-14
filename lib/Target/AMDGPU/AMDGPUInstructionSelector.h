@@ -59,6 +59,7 @@ private:
   bool selectImpl(MachineInstr &I, CodeGenCoverage &CoverageInfo) const;
 
   MachineOperand getSubOperand64(MachineOperand &MO, unsigned SubIdx) const;
+  bool selectCOPY(MachineInstr &I) const;
   bool selectG_CONSTANT(MachineInstr &I) const;
   bool selectG_ADD(MachineInstr &I) const;
   bool selectG_GEP(MachineInstr &I) const;
@@ -71,6 +72,9 @@ private:
 
   InstructionSelector::ComplexRendererFns
   selectVSRC0(MachineOperand &Root) const;
+
+  InstructionSelector::ComplexRendererFns
+  selectVOP3Mods0(MachineOperand &Root) const;
 
   const SIInstrInfo &TII;
   const SIRegisterInfo &TRI;
