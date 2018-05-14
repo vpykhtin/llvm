@@ -41,9 +41,9 @@ public:
         if (F.getCallingConv() != CallingConv::AMDGPU_KERNEL) return false;
 
         SmallVector<Argument *, 8> PtrArgs;
-        for (auto &&Arg : F.args()) {
+        for_each(F.arg_begin(), F.arg_end(), [&](Argument &Arg) {
             if (Arg.getType()->isPointerTy()) PtrArgs.push_back(&Arg);
-        }
+        });
 
         if (PtrArgs.empty()) return false;
 
