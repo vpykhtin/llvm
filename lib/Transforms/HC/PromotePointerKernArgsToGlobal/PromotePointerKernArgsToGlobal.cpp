@@ -7,139 +7,63 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file declares and defines a pass which promotes pointer formal arguments
-// to a kernel (i.e. pfe trampoline or HIP __global__ function) from the generic
-// address space to the global address space. This transformation is valid due
-// to the invariants established by both HC and HIP in accordance with an
-// address passed to a kernel can only reside in the global address space. It is
-// preferable to execute SelectAcceleratorCode before, as this reduces the
-// workload by pruning functions that are not reachable by an accelerator.
+// This file declares and defines a pass which uses the double-cast trick (
+// generic-to-global and global-to-generic) for the formal arguments of pointer
+// type of a kernel (i.e. pfe trampoline or HIP __global__ function). This
+// transformation is valid due to the invariants established by both HC and HIP
+// in accordance with an address passed to a kernel can only reside in the
+// global address space. It is preferable to execute SelectAcceleratorCode
+// before, as this reduces the workload by pruning functions that are not
+// reachable by an accelerator. It is mandatory to run InferAddressSpaces after,
+// otherwise no benefit shall be obtained (the spurious casts do get removed).
 //===----------------------------------------------------------------------===//
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/IR/Attributes.h"
-#include "llvm/IR/CallSite.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/Module.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/Pass.h"
-#include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
-#include <utility>
 
 using namespace llvm;
 using namespace std;
 
 namespace {
-class PromotePointerKernArgsToGlobal : public ModulePass {
+class PromotePointerKernArgsToGlobal : public FunctionPass {
     // TODO: query the address space robustly.
     static constexpr unsigned int GlobalAddrSpace{1u};
-
-    static
-    pair<SmallVector<Type *, 8>, bool> makeNewArgList(const Function &F)
-    {
-        bool MustPromote = false;
-        SmallVector<Type *, 8> NewArgs;
-        for_each(F.arg_begin(), F.arg_end(), [&](const Argument &Arg) {
-            if (!Arg.getType()->isPointerTy()) {
-                NewArgs.push_back(Arg.getType());
-
-                return;
-            }
-
-            NewArgs.push_back(cast<PointerType>(Arg.getType())
-                ->getElementType()->getPointerTo(GlobalAddrSpace));
-
-            MustPromote = true;
-        });
-
-        return {NewArgs, MustPromote};
-    }
-
-    static
-    Function *makeNewFunction(
-        Module &M, Function &F, const SmallVector<Type *, 8>& NewArgList)
-    {
-        Type *RetTy = F.getFunctionType()->getReturnType();
-        FunctionType *NewFTy = FunctionType::get(
-            RetTy, NewArgList, F.getFunctionType()->isVarArg());
-
-        Function *NewF = Function::Create(NewFTy, F.getLinkage(), F.getName());
-        NewF->copyAttributesFrom(&F);
-
-        NewF->setSubprogram(F.getSubprogram());
-        F.setSubprogram(nullptr);
-
-        SmallVector<AttributeSet, 8> ArgAttribs;
-        decltype(NewArgList.size()) ArgNo = 0;
-        do {
-            ArgAttribs.push_back(F.getAttributes().getParamAttributes(ArgNo));
-            ++ArgNo;
-        } while (ArgNo != NewArgList.size());
-
-        NewF->setAttributes(AttributeList::get(
-            F.getContext(),
-            F.getAttributes().getFnAttributes(),
-            F.getAttributes().getRetAttributes(),
-            ArgAttribs));
-        M.getFunctionList().insert(F.getIterator(), NewF);
-        NewF->takeName(&F);
-        NewF->getBasicBlockList().splice(NewF->begin(), F.getBasicBlockList());
-
-        return NewF;
-    }
-
-    static
-    void replaceWithPromotedFunction(Function &OldF, Function &PromotedF)
-    {
-        auto It0 = OldF.arg_begin();
-        auto It1 = PromotedF.arg_begin();
-
-        while (It0 != OldF.arg_end()) {
-            It1->takeName(&*It0);
-            if (It0->getType() == It1->getType()) {
-                It0->replaceAllUsesWith(&*It1);
-            }
-            while (!It0->use_empty()) {
-                It0->user_back()->replaceUsesOfWith(It0, It1);
-            }
-
-            ++It0;
-            ++It1;
-        }
-
-        OldF.dropAllReferences();
-        OldF.replaceAllUsesWith(UndefValue::get(OldF.getType()));
-    }
 public:
     static char ID;
-    PromotePointerKernArgsToGlobal() : ModulePass{ID} {}
+    PromotePointerKernArgsToGlobal() : FunctionPass{ID} {}
 
-    bool runOnModule(Module &M) override
+    bool runOnFunction(Function &F) override
     {
-        SmallVector<Function *, 8> OldFns;
-        bool Modified = false;
-        for_each(M.begin(), M.end(), [&](Function &F) {
-            if (F.getCallingConv() != CallingConv::AMDGPU_KERNEL) return;
+        if (F.getCallingConv() != CallingConv::AMDGPU_KERNEL) return false;
 
-            auto NewArgList = makeNewArgList(F);
+        SmallVector<Argument *, 8> PtrArgs;
+        for (auto &&Arg : F.args()) {
+            if (Arg.getType()->isPointerTy()) PtrArgs.push_back(&Arg);
+        }
 
-            if (!NewArgList.second) return;
+        if (PtrArgs.empty()) return false;
 
-            OldFns.push_back(&F);
-            auto PromotedF = makeNewFunction(M, F, NewArgList.first);
-            replaceWithPromotedFunction(F, *PromotedF);
+        static IRBuilder<> Builder{F.getContext()};
+        Builder.SetInsertPoint(&F.getEntryBlock().front());
 
-            Modified = true;
+        for_each(PtrArgs.begin(), PtrArgs.end(), [](Argument *PArg) {
+            auto Tmp = new Argument{PArg->getType()};
+            PArg->replaceAllUsesWith(Tmp);
+
+            Value *FToG = Builder.CreateAddrSpaceCast(
+                PArg,
+                cast<PointerType>(PArg->getType())
+                    ->getElementType()->getPointerTo(GlobalAddrSpace));
+            Value *GToF = Builder.CreateAddrSpaceCast(FToG, PArg->getType());
+
+            Tmp->replaceAllUsesWith(GToF);
         });
 
-        for_each(OldFns.begin(), OldFns.end(), [](Function *F) {
-            F->eraseFromParent();
-        });
-
-        return Modified;
+        return true;
     }
 };
 char PromotePointerKernArgsToGlobal::ID = 0;
