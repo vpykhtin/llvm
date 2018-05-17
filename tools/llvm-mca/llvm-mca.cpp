@@ -24,6 +24,7 @@
 #include "BackendPrinter.h"
 #include "CodeRegion.h"
 #include "DispatchStatistics.h"
+#include "FetchStage.h"
 #include "InstructionInfoView.h"
 #include "InstructionTables.h"
 #include "RegisterFileStatistics.h"
@@ -153,6 +154,15 @@ static cl::opt<bool> PrintInstructionInfoView(
     cl::desc("Print the instruction info view (enabled by default)"),
     cl::cat(ViewOptions), cl::init(true));
 
+static cl::opt<bool> EnableAllStats("all-stats",
+                                    cl::desc("Print all hardware statistics"),
+                                    cl::cat(ViewOptions), cl::init(false));
+
+static cl::opt<bool>
+    EnableAllViews("all-views",
+                   cl::desc("Print all views including hardware statistics"),
+                   cl::cat(ViewOptions), cl::init(false));
+
 namespace {
 
 const Target *getTarget(const char *ProgName) {
@@ -272,6 +282,32 @@ public:
 };
 } // end of anonymous namespace
 
+static void processOptionImpl(cl::opt<bool> &O, const cl::opt<bool> &Default) {
+  if (!O.getNumOccurrences() || O.getPosition() < Default.getPosition())
+    O = Default.getValue();
+}
+
+static void processViewOptions() {
+  if (!EnableAllViews.getNumOccurrences() &&
+      !EnableAllStats.getNumOccurrences())
+    return;
+
+  if (EnableAllViews.getNumOccurrences()) {
+    processOptionImpl(PrintResourcePressureView, EnableAllViews);
+    processOptionImpl(PrintTimelineView, EnableAllViews);
+    processOptionImpl(PrintInstructionInfoView, EnableAllViews);
+  }
+
+  const cl::opt<bool> &Default =
+      EnableAllViews.getPosition() < EnableAllStats.getPosition()
+          ? EnableAllStats
+          : EnableAllViews;
+  processOptionImpl(PrintRegisterFileStats, Default);
+  processOptionImpl(PrintDispatchStats, Default);
+  processOptionImpl(PrintSchedulerStats, Default);
+  processOptionImpl(PrintRetireStats, Default);
+}
+
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
 
@@ -307,6 +343,9 @@ int main(int argc, char **argv) {
     WithColor::error() << InputFilename << ": " << EC.message() << '\n';
     return 1;
   }
+
+  // Apply overrides to llvm-mca specific options.
+  processViewOptions();
 
   SourceMgr SrcMgr;
 
@@ -435,8 +474,13 @@ int main(int argc, char **argv) {
       continue;
     }
 
-    mca::Backend B(*STI, *MRI, IB, S, Width, RegisterFileSize, LoadQueueSize,
-                   StoreQueueSize, AssumeNoAlias);
+    // Ideally, I'd like to expose the pipeline building here,
+    // by registering all of the Stage instances.
+    // But for now, it's just this single puppy.
+    std::unique_ptr<mca::FetchStage> Fetch =
+        llvm::make_unique<mca::FetchStage>(IB, S);
+    mca::Backend B(*STI, *MRI, std::move(Fetch), Width, RegisterFileSize,
+                   LoadQueueSize, StoreQueueSize, AssumeNoAlias);
     mca::BackendPrinter Printer(B);
 
     Printer.addView(llvm::make_unique<mca::SummaryView>(S, Width));
