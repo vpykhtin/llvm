@@ -253,6 +253,13 @@ void GCNRPTracker::collectVirtualRegUses(const MachineInstr &MI,
 ///////////////////////////////////////////////////////////////////////////////
 // GCNRPTracker
 
+GCNRPTracker::LiveRegSet& llvm::operator+=(GCNRPTracker::LiveRegSet &To,
+                                           const GCNRPTracker::LiveRegSet &From) {
+  for (const auto &RM : From)
+    To[RM.first] |= RM.second;
+  return To;
+}
+
 GCNRPTracker::LiveRegSet llvm::operator-(const GCNRPTracker::LiveRegSet &LR1,
                                          const GCNRPTracker::LiveRegSet &LR2) {
   GCNRPTracker::LiveRegSet Res;

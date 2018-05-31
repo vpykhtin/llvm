@@ -142,6 +142,9 @@ public:
                             const MachineRegisterInfo &MRI);
 };
 
+GCNRPTracker::LiveRegSet& operator+=(GCNRPTracker::LiveRegSet &To,
+                                     const GCNRPTracker::LiveRegSet &From);
+
 GCNRPTracker::LiveRegSet operator-(const GCNRPTracker::LiveRegSet &LR1,
                                    const GCNRPTracker::LiveRegSet &LR2);
 
