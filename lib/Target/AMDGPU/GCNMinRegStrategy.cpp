@@ -348,6 +348,7 @@ class GCNMinRegScheduler2 {
   };
 
   typedef std::map<MergeSet, unsigned> MergeInfo;
+  struct MergeChunk;
 
   struct Subgraph : ilist_node<Subgraph> {
     unsigned ID;
@@ -445,10 +446,16 @@ class GCNMinRegScheduler2 {
                       const Set &Tier,
                       const GCNMinRegScheduler2 &LSUSource);
 
+#if 0
     using LSURange = decltype(make_range(List.begin(),List.end()));
 
     std::map<LinkedSU*, LSURange, LSUExecOrder>
       getMergeChunks(Subgraph *MergeTo, GCNMinRegScheduler2 &LSUSource);
+
+#else
+    std::vector<MergeChunk> getMergeChunks(Subgraph *MergeTo,
+                                           GCNMinRegScheduler2 &LSUSource);
+#endif
 
     void updateOrderIndexes() {
       unsigned I = 0;
@@ -456,7 +463,7 @@ class GCNMinRegScheduler2 {
         LSU.SGOrderIndex = I++;
     }
 
-    void dump(raw_ostream &O) const;
+    void dump(raw_ostream &O, Subgraph *MergedSG = nullptr) const;
 
 #ifndef NDEBUG
     bool isValidMergeTo(Subgraph *MergeTo) const { 
@@ -481,6 +488,11 @@ class GCNMinRegScheduler2 {
     void patchDepsAfterMerge(Subgraph *Mergee);
 
     void rollbackMerge();
+  };
+
+  struct MergeChunk {
+    LinkedSU* MergePoint = nullptr;
+    decltype(Subgraph::List)::iterator Last;
   };
 
   const LiveIntervals &LIS;
@@ -818,6 +830,7 @@ struct GCNMinRegScheduler2::LSUExecOrder {
   }
 };
 
+#if 0
 std::map<GCNMinRegScheduler2::LinkedSU*,
          GCNMinRegScheduler2::Subgraph::LSURange,
          GCNMinRegScheduler2::LSUExecOrder>
@@ -905,6 +918,115 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
 #endif
   //DEBUG(dump(dbgs()));
 }
+
+#else
+
+std::vector<GCNMinRegScheduler2::MergeChunk>
+GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
+                                              GCNMinRegScheduler2 &LSUSource) {
+  struct Info {
+    unsigned ExecOrder;
+    unsigned NumSuccs;
+  };
+  DenseMap<LinkedSU*, Info> MergePointInfo; {
+    unsigned ExecOrder = 0; // actually inverted order
+    for (auto &LSU : MergeTo->List) {
+      if (!LSU.hasExternalSuccs)
+        continue;
+
+      unsigned NumSuccs = 0;
+      for (const auto &Succ : LSU->Succs) {
+        if (Succ.isAssignedRegDep() &&
+          LSUSource.getLSU(Succ.getSUnit()).Parent == this)
+          ++NumSuccs;
+      }
+      if (NumSuccs)
+        MergePointInfo[&LSU] = { ExecOrder++, NumSuccs };
+    }
+  }
+
+  std::vector<MergeChunk> Chunks(MergePointInfo.size());
+  SGRPTracker RPT(LSUSource, *this);
+  RPT.reset();
+
+  unsigned CurMPIdx = 0;
+  auto BestPressure = RPT.getPressure();
+
+  while (!RPT.done()) {
+    auto &CurLSU = RPT.getCur();
+
+    auto LowestPredI = MergePointInfo.end();
+    for (const auto &Pred : CurLSU->Preds) {
+      if (!Pred.isAssignedRegDep())
+        continue;
+
+      auto &MPLSU = LSUSource.getLSU(Pred.getSUnit());
+      if (!MPLSU.hasExternalSuccs)
+        continue;
+
+      auto I = MergePointInfo.find(&MPLSU);
+      if (I == MergePointInfo.end())
+        continue;
+
+      assert(I->second.NumSuccs);
+      if (--I->second.NumSuccs != 0)
+        continue;
+
+      if (LowestPredI == MergePointInfo.end() ||
+          LowestPredI->second.ExecOrder > I->second.ExecOrder)
+        LowestPredI = I;
+    }
+
+    if (LowestPredI != MergePointInfo.end()) {
+      auto &MPInfo = LowestPredI->second;
+      auto &C = Chunks[MPInfo.ExecOrder];
+      C.MergePoint = LowestPredI->first;
+      C.Last = CurLSU.getIterator();
+      BestPressure = RPT.getPressure();
+
+      if (MPInfo.ExecOrder < CurMPIdx) { // twist handling
+        for (auto K = MPInfo.ExecOrder + 1; K <= CurMPIdx; ++K)
+          Chunks[K].MergePoint = nullptr;
+      }
+      CurMPIdx = MPInfo.ExecOrder;
+    } else if (RPT.getPressure().getVGPRNum() < BestPressure.getVGPRNum()) {
+      Chunks[CurMPIdx].Last = CurLSU.getIterator();
+      BestPressure = RPT.getPressure();
+    }
+
+    RPT.recede();
+  }
+
+  // shrink chunks
+  std::vector<MergeChunk> ReadyChunks;
+  ReadyChunks.reserve(MergePointInfo.size());
+  for (auto &C : Chunks)
+    if (C.MergePoint)
+      ReadyChunks.push_back(C);
+
+  return ReadyChunks;
+}
+
+template <typename Range>
+void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
+                                                  GCNMinRegScheduler2 &LSUSource) {
+  updateOrderIndexes();
+  for (auto *M : Mergees) {
+    assert(M->isValidMergeTo(this));
+    auto Begin = M->List.begin();
+    for (auto &P : M->getMergeChunks(this, LSUSource)) {
+      auto End = std::next(P.Last);
+      List.splice(P.MergePoint->getIterator(), M->List, Begin, End);
+      Begin = End;
+    }
+    List.splice(List.end(), M->List);
+    assert(M->List.empty() || (M->dump(dbgs()), false));
+    DEBUG(dbgs() << "\nMerge SG" << M->ID << " into SG" << ID << ":\n";
+          dump(dbgs(), M));
+  }
+}
+
+#endif
 
 // returns the number of SU successors belonging to R
 unsigned GCNMinRegScheduler2::getSubgraphSuccNum(const LinkedSU &LSU) const {
@@ -1272,13 +1394,15 @@ void GCNMinRegScheduler2::merge() {
     DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
 
-#if 0
-  while (true) {
+#if 1
+  while(true) {
     auto Merges = getMultiTierMerges();
     if (Merges.empty())
       break;
-    for (auto &M : Merges)
-      tryMerge(M.first);
+    for (auto &M : Merges) {
+      if (!tryMerge(M.first))
+        WastedMS.insert(M.first);
+    }
     DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
 #endif
@@ -1477,11 +1601,12 @@ std::vector<const SUnit*> GCNMinRegScheduler2::finalSchedule() {
 ///////////////////////////////////////////////////////////////////////////////
 // Dumping
 
-void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O) const {
+void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O, Subgraph *MergedSG) const {
   O << "Subgraph " << ID << '\n';
   for (const auto &LSU : make_range(List.rbegin(), List.rend())) {
-    dbgs() << "SU" << LSU.getNodeNum() << ": ";
-    O << *(LSU->getInstr());
+    if (LSU.Parent != this && (!MergedSG || LSU.Parent == MergedSG))
+      O << "  SG" << LSU.Parent->ID << ": ";
+    O << "SU" << LSU.getNodeNum() << ": " << *(LSU->getInstr());
   }
   O << '\n';
 }
