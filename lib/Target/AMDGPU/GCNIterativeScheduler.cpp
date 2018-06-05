@@ -724,11 +724,11 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
   const auto TgtOcc = MFI->getOccupancy();
   sortRegionsByPressure(TgtOcc);
 
-  DEBUG(printRegions(dbgs()));
+  LLVM_DEBUG(printRegions(dbgs()));
 
   auto MaxPressure = Regions.front()->MaxPressure;
   for (auto *R : Regions) {
-    DEBUG(
+    LLVM_DEBUG(
       dbgs() << "Scheduling\n";
       printLivenessInfo(dbgs(), R->Begin, R->End, LIS);
       dbgs() << "RP: ";
@@ -746,12 +746,12 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
 
     //DEBUG(dumpSUs());
 
-    DEBUG(dbgs() << "\n=== Begin scheduling " << R->getName(LIS) << '\n');
+    LLVM_DEBUG(dbgs() << "\n=== Begin scheduling " << R->getName(LIS) << '\n');
     const auto MinSchedule = makeMinRegSchedule2(DAG.getBottomRoots(),
                                                  getRegionLiveThrough(*R),
                                                  getRegionLiveOuts(*R),
                                                  *this);
-    DEBUG(dbgs() << "\n=== End scheduling " << R->getName(LIS) << '\n');
+    LLVM_DEBUG(dbgs() << "\n=== End scheduling " << R->getName(LIS) << '\n');
     assert(validateSchedule(*R, MinSchedule));
 
     const auto RPAfter = getSchedulePressure(*R, MinSchedule);

@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "GCNIterativeScheduler.h"
+#include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -17,10 +18,8 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-
 #include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/Filesystem.h"
-
 #include <cassert>
 #include <cstdint>
 #include <limits>
@@ -1021,8 +1020,8 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
     }
     List.splice(List.end(), M->List);
     assert(M->List.empty() || (M->dump(dbgs()), false));
-    DEBUG(dbgs() << "\nMerge SG" << M->ID << " into SG" << ID << ":\n";
-          dump(dbgs(), M));
+    LLVM_DEBUG(dbgs() << "\nMerge SG" << M->ID << " into SG" << ID << ":\n";
+               dump(dbgs(), M));
   }
 }
 
@@ -1365,11 +1364,11 @@ bool GCNMinRegScheduler2::tryMerge(const MergeSet &MS) {
 
   const auto RPAfter = RT.moveMaxPressure();
 
-  DEBUG(dbgs() << "RP before merge: "; RPBefore.print(dbgs());
-        dbgs() << "RP after merge:  "; RPAfter.print(dbgs()));
+  LLVM_DEBUG(dbgs() << "RP before merge: "; RPBefore.print(dbgs());
+             dbgs() << "RP after merge:  "; RPAfter.print(dbgs()));
 
   if (RPAfter.getVGPRNum() >= RPBefore.getVGPRNum()) {
-    DEBUG(dbgs() << "Unsuccessfull merge, rolling back\n");
+    LLVM_DEBUG(dbgs() << "Unsuccessfull merge, rolling back\n");
     MS.Center->rollbackMerge();
     return false;
   }
@@ -1381,7 +1380,7 @@ bool GCNMinRegScheduler2::tryMerge(const MergeSet &MS) {
 }
 
 void GCNMinRegScheduler2::merge() {
-  DEBUG(writeGraph("subdags_original.dot"));
+  LLVM_DEBUG(writeGraph("subdags_original.dot"));
   int I = 0;
   while(true) {
     auto Merges = getOneTierMerges();
@@ -1391,7 +1390,7 @@ void GCNMinRegScheduler2::merge() {
       if (!tryMerge(M.first))
         WastedMS.insert(M.first);
     }
-    DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
+    LLVM_DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
 
 #if 1
@@ -1403,7 +1402,7 @@ void GCNMinRegScheduler2::merge() {
       if (!tryMerge(M.first))
         WastedMS.insert(M.first);
     }
-    DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
+    LLVM_DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
 #endif
 
