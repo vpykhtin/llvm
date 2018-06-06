@@ -462,7 +462,7 @@ class GCNMinRegScheduler2 {
         LSU.SGOrderIndex = I++;
     }
 
-    void dump(raw_ostream &O, Subgraph *MergedSG = nullptr) const;
+    void dump(raw_ostream &O) const;
 
 #ifndef NDEBUG
     bool isValidMergeTo(Subgraph *MergeTo) const { 
@@ -1010,6 +1010,8 @@ template <typename Range>
 void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
                                                   GCNMinRegScheduler2 &LSUSource) {
   updateOrderIndexes();
+
+
   for (auto *M : Mergees) {
     assert(M->isValidMergeTo(this));
     auto Begin = M->List.begin();
@@ -1020,9 +1022,16 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
     }
     List.splice(List.end(), M->List);
     assert(M->List.empty() || (M->dump(dbgs()), false));
-    LLVM_DEBUG(dbgs() << "\nMerge SG" << M->ID << " into SG" << ID << ":\n";
-               dump(dbgs(), M));
+    //if (M->ID == 1) {
+    //  LLVM_DEBUG(dbgs() << "\nMerge into SG" << ID << ":";
+    //  dump(dbgs()));
+    //}
   }
+  LLVM_DEBUG(dbgs() << "\nMerge into SG" << ID << ":";
+             for(auto *M : Mergees)
+               dbgs() << " SG" << M->ID;
+             dbgs() << '\n';
+             dump(dbgs()));
 }
 
 #endif
@@ -1436,12 +1445,15 @@ public:
 #ifndef NDEBUG
     auto PrevLen = SG.List.size();
 #endif
+    LLVM_DEBUG(dbgs() << "Scheduling SG" << SG.ID <<'\n');
     SG.List.clear();
     while (!Worklist.empty()) {
       auto &LSU = *Worklist.top();
       Worklist.pop();
       SG.List.push_back(LSU);
       releasePreds(LSU);
+      LLVM_DEBUG(dbgs() << "SUN: " << SethiUllmanNumbers[LSU.getNodeNum()]
+                        << " " << *(LSU->getInstr()));
     }
     assert(PrevLen == SG.List.size());
   }
@@ -1509,6 +1521,7 @@ private:
 
   static bool ignoreReg(unsigned Reg) {
     switch (Reg) {
+    case AMDGPU::EXEC:
     case AMDGPU::M0: return true;
     default: break;
     }
@@ -1600,12 +1613,31 @@ std::vector<const SUnit*> GCNMinRegScheduler2::finalSchedule() {
 ///////////////////////////////////////////////////////////////////////////////
 // Dumping
 
-void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O, Subgraph *MergedSG) const {
+void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O) const {
+  DenseMap<const Subgraph*, unsigned> Level; {
+    MergeSet MS;
+    for (const auto &LSU : List)
+      if (LSU.Parent != this)
+        MS.Mergees.insert(LSU.Parent);
+    // MS.Mergees is topo sorted
+    for(auto *M: MS.Mergees) {
+      unsigned MaxLevel = 0;
+      for (const auto &Pred : M->Preds) {
+        auto I = Level.find(Pred.first);
+        if (I != Level.end())
+          MaxLevel = std::max(MaxLevel, I->second);
+      }
+      Level[M] = MaxLevel + 1;
+    }
+  }
+
   O << "Subgraph " << ID << '\n';
   for (const auto &LSU : make_range(List.rbegin(), List.rend())) {
-    if (LSU.Parent != this && (!MergedSG || LSU.Parent == MergedSG))
-      O << "  SG" << LSU.Parent->ID << ": ";
-    O << "SU" << LSU.getNodeNum() << ": " << *(LSU->getInstr());
+    if (LSU.Parent != this)
+      O.indent(2 * Level[LSU.Parent]) << "SG" << LSU.Parent->ID << ": ";
+
+    LSU->getInstr()->print(O, true, false, false, false);
+    O << ": SU" << LSU.getNodeNum() << '\n';
   }
   O << '\n';
 }
