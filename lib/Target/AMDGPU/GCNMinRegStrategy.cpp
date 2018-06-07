@@ -1432,6 +1432,13 @@ void GCNMinRegScheduler2::merge() {
 // Scheduling
 
 class GCNMinRegScheduler2::SGScheduler {
+  struct Unit { // schedule unit
+    Unit(LinkedSU *LSU_, unsigned Priority_ = 0)
+      : LSU(LSU_)
+      , Priority(Priority_) {}
+    LinkedSU *LSU;
+    unsigned Priority;
+  };
 public:
   SGScheduler(Subgraph &SG_, GCNMinRegScheduler2 &LSUSource_)
     : SG(SG_)
@@ -1445,15 +1452,16 @@ public:
 #ifndef NDEBUG
     auto PrevLen = SG.List.size();
 #endif
-    LLVM_DEBUG(dbgs() << "Scheduling SG" << SG.ID <<'\n');
+    //LLVM_DEBUG(dbgs() << "Scheduling SG" << SG.ID <<'\n');
     SG.List.clear();
+    unsigned StepNo = 0;
     while (!Worklist.empty()) {
-      auto &LSU = *Worklist.top();
+      auto Unit = Worklist.top();
       Worklist.pop();
-      SG.List.push_back(LSU);
-      releasePreds(LSU);
-      LLVM_DEBUG(dbgs() << "SUN: " << SethiUllmanNumbers[LSU.getNodeNum()]
-                        << " " << *(LSU->getInstr()));
+      SG.List.push_back(*Unit.LSU);
+      releasePreds(*Unit.LSU, ++StepNo);
+      //LLVM_DEBUG(dbgs() << "SUN: " << SethiUllmanNumbers[Unit.LSU->getNodeNum()]
+      //                  << " " << *(*Unit.LSU)->getInstr());
     }
     assert(PrevLen == SG.List.size());
   }
@@ -1467,9 +1475,12 @@ private:
   struct scheduleBefore {
     const SGScheduler &SGS;
     scheduleBefore(const SGScheduler &SGS_) : SGS(SGS_) {}
-    bool operator()(const LinkedSU *LSU1, const LinkedSU *LSU2) {
-      const auto SUNum1 = SGS.SethiUllmanNumbers[LSU1->getNodeNum()];
-      const auto SUNum2 = SGS.SethiUllmanNumbers[LSU2->getNodeNum()];
+    bool operator()(const Unit &I1, const Unit &I2) {
+      if (I1.Priority != I2.Priority)
+        return I1.Priority < I2.Priority;
+
+      const auto SUNum1 = SGS.SethiUllmanNumbers[I1.LSU->getNodeNum()];
+      const auto SUNum2 = SGS.SethiUllmanNumbers[I2.LSU->getNodeNum()];
       if (SUNum1 != SUNum2)
         return SUNum1 > SUNum2;
       /*
@@ -1481,10 +1492,10 @@ private:
       return false;
     }
   };
-  std::priority_queue<LinkedSU*, std::vector<LinkedSU*>, scheduleBefore> Worklist;
+  std::priority_queue<Unit, std::vector<Unit>, scheduleBefore> Worklist;
 
-  std::vector<LinkedSU*> init() {
-    std::vector<LinkedSU*> BotRoots;
+  std::vector<Unit> init() {
+    std::vector<Unit> BotRoots;
     for (auto &LSU : SG.List) {
       if (auto NumSucc = LSUSource.getSubgraphSuccNum(LSU))
         NumSuccs[LSU.getNodeNum()] = NumSucc;
@@ -1494,7 +1505,7 @@ private:
     return BotRoots;
   }
 
-  void releasePreds(LinkedSU &LSU) {
+  void releasePreds(LinkedSU &LSU, unsigned Priority) {
     for (auto &Pred : LSU->Preds) {
       const auto *PredSU = Pred.getSUnit();
       if (Pred.isWeak() || PredSU->isBoundaryNode())
@@ -1506,7 +1517,7 @@ private:
 
       assert(NumSuccs[PredLSU.getNodeNum()]);
       if (0 == --NumSuccs[PredLSU.getNodeNum()])
-        Worklist.push(&PredLSU);
+        Worklist.push(Unit(&PredLSU, Priority));
     }
   }
 
