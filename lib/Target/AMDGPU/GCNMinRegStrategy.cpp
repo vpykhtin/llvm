@@ -462,7 +462,7 @@ class GCNMinRegScheduler2 {
         LSU.SGOrderIndex = I++;
     }
 
-    void dump(raw_ostream &O) const;
+    void dump(raw_ostream &O, GCNMinRegScheduler2 *LSUSource = nullptr) const;
 
 #ifndef NDEBUG
     bool isValidMergeTo(Subgraph *MergeTo) const { 
@@ -659,6 +659,7 @@ void GCNMinRegScheduler2::Subgraph::rollbackMerge() {
   }
 }
 
+#if 0
 class GCNMinRegScheduler2::ReadyPredTracker {
   GCNMinRegScheduler2 &LSUSource;
   Subgraph &SG, *MergeTo;
@@ -724,6 +725,7 @@ public:
     return PredLSU;
   }
 };
+#endif
 
 class GCNMinRegScheduler2::SGRPTracker {
   GCNMinRegScheduler2 &LSUSource;
@@ -1024,14 +1026,14 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
     assert(M->List.empty() || (M->dump(dbgs()), false));
     //if (M->ID == 1) {
     //  LLVM_DEBUG(dbgs() << "\nMerge into SG" << ID << ":";
-    //  dump(dbgs()));
+    //             dump(dbgs(), &LSUSource));
     //}
   }
   LLVM_DEBUG(dbgs() << "\nMerge into SG" << ID << ":";
              for(auto *M : Mergees)
                dbgs() << " SG" << M->ID;
              dbgs() << '\n';
-             dump(dbgs()));
+             dump(dbgs(), &LSUSource));
 }
 
 #endif
@@ -1624,7 +1626,8 @@ std::vector<const SUnit*> GCNMinRegScheduler2::finalSchedule() {
 ///////////////////////////////////////////////////////////////////////////////
 // Dumping
 
-void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O) const {
+void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O,
+                                        GCNMinRegScheduler2 *LSUSource) const {
   DenseMap<const Subgraph*, unsigned> Level; {
     MergeSet MS;
     for (const auto &LSU : List)
@@ -1642,8 +1645,22 @@ void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O) const {
     }
   }
 
+  DenseMap<const LinkedSU*, unsigned> NumVGPRUsed;
+  if (LSUSource) {
+    GCNUpwardRPTracker RPT(LSUSource->LIS);
+    RPT.addIgnoreRegs(LSUSource->LiveThrRegs);
+    RPT.reset(*List.front()->getInstr(), &LiveOutRegs);
+    for(const auto &LSU : List) {
+      NumVGPRUsed[&LSU] = RPT.getPressure().getVGPRNum();
+      RPT.recede(*LSU->getInstr());
+    }
+  }
+
   O << "Subgraph " << ID << '\n';
   for (const auto &LSU : make_range(List.rbegin(), List.rend())) {
+    if (!NumVGPRUsed.empty())
+      O << 'V' << NumVGPRUsed[&LSU] << ' ';
+
     if (LSU.Parent != this)
       O.indent(2 * Level[LSU.Parent]) << "SG" << LSU.Parent->ID << ": ";
 
