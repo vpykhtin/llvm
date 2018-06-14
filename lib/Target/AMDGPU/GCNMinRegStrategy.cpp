@@ -946,6 +946,9 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
     }
   }
 
+  const bool Dump = ID == 17;
+  //const bool Dump = false;
+
   std::vector<MergeChunk> Chunks(MergePointInfo.size());
   SGRPTracker RPT(LSUSource, *this);
   RPT.reset();
@@ -953,8 +956,19 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
   unsigned CurMPIdx = 0;
   auto BestPressure = RPT.getPressure();
 
+  LLVM_DEBUG(if (Dump) { 
+    dbgs() << "RP: "; BestPressure.dump();
+    dbgs() << '\n';
+  });
+
   while (!RPT.done()) {
     auto &CurLSU = RPT.getCur();
+    RPT.recede();
+
+    LLVM_DEBUG(if (Dump) {
+      dbgs() << *CurLSU->getInstr();
+      dbgs() << "RP: "; RPT.getPressure().dump();
+    });
 
     auto LowestPredI = MergePointInfo.end();
     for (const auto &Pred : CurLSU->Preds) {
@@ -985,6 +999,11 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
       C.Last = CurLSU.getIterator();
       BestPressure = RPT.getPressure();
 
+      LLVM_DEBUG(if (Dump) {
+        dbgs() << "New merge point after: " << *(*C.MergePoint)->getInstr();
+        dbgs() << "Best RP: "; BestPressure.dump();
+      });
+
       if (MPInfo.ExecOrder < CurMPIdx) { // twist handling
         for (auto K = MPInfo.ExecOrder + 1; K <= CurMPIdx; ++K)
           Chunks[K].MergePoint = nullptr;
@@ -993,9 +1012,15 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
     } else if (RPT.getPressure().getVGPRNum() < BestPressure.getVGPRNum()) {
       Chunks[CurMPIdx].Last = CurLSU.getIterator();
       BestPressure = RPT.getPressure();
-    }
 
-    RPT.recede();
+      LLVM_DEBUG(if (Dump && Chunks[CurMPIdx].MergePoint) {
+        dbgs() << "add after: " << *(*Chunks[CurMPIdx].MergePoint)->getInstr();
+        dbgs() << "Best RP: "; BestPressure.dump();
+      });
+    }
+    LLVM_DEBUG(if (Dump) {
+      dbgs() << '\n';
+    });
   }
 
   // shrink chunks
@@ -1447,7 +1472,7 @@ public:
     , LSUSource(LSUSource_)
     , SethiUllmanNumbers(calcSethiUllman())
     , NumSuccs(LSUSource_.LSUStorage.size())
-    , Worklist(scheduleBefore(*this), init()) {
+    , Worklist(scheduleLater(*this), init()) {
   }
 
   void schedule() {
@@ -1474,12 +1499,19 @@ private:
   std::vector<unsigned> NumSuccs;
   std::vector<unsigned> SethiUllmanNumbers;
 
-  struct scheduleBefore {
+  struct scheduleLater {
     const SGScheduler &SGS;
-    scheduleBefore(const SGScheduler &SGS_) : SGS(SGS_) {}
+    scheduleLater(const SGScheduler &SGS_) : SGS(SGS_) {}
+
+    // return true if I1 should be scheduled later (in bottom-up order) than I2
     bool operator()(const Unit &I1, const Unit &I2) {
       if (I1.Priority != I2.Priority)
         return I1.Priority < I2.Priority;
+
+      if (I1.LSU->hasExternalSuccs != I2.LSU->hasExternalSuccs)
+        return I1.LSU->hasExternalSuccs > I2.LSU->hasExternalSuccs;
+      else if (I1.LSU->hasExternalSuccs)
+        return (*I1.LSU)->Succs.size() > (*I2.LSU)->Succs.size();
 
       const auto SUNum1 = SGS.SethiUllmanNumbers[I1.LSU->getNodeNum()];
       const auto SUNum2 = SGS.SethiUllmanNumbers[I2.LSU->getNodeNum()];
@@ -1494,7 +1526,7 @@ private:
       return false;
     }
   };
-  std::priority_queue<Unit, std::vector<Unit>, scheduleBefore> Worklist;
+  std::priority_queue<Unit, std::vector<Unit>, scheduleLater> Worklist;
 
   std::vector<Unit> init() {
     std::vector<Unit> BotRoots;
@@ -1659,7 +1691,7 @@ void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O,
   O << "Subgraph " << ID << '\n';
   for (const auto &LSU : make_range(List.rbegin(), List.rend())) {
     if (!NumVGPRUsed.empty())
-      O << 'V' << NumVGPRUsed[&LSU] << ' ';
+      O << format("V%-4d ", NumVGPRUsed[&LSU], 4);
 
     if (LSU.Parent != this)
       O.indent(2 * Level[LSU.Parent]) << "SG" << LSU.Parent->ID << ": ";
@@ -1675,7 +1707,7 @@ static const bool GraphScheduleMode = false;
 
 bool GCNMinRegScheduler2::isExpanded(const Subgraph &R) {
   static const DenseSet<unsigned> Expand =
-   {};
+   { 0, 1, 16, 17, 19};
   //{ 1, 2};
 
   return Expand.count(R.ID) > 0 || (R.List.size() <= 2);
