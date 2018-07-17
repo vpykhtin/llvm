@@ -402,6 +402,7 @@ class GCNMinRegScheduler2 {
         if (!hasSucc)
           ++NumBottomRoots;
       }
+      assert(NumBottomRoots > 0);
       return NumBottomRoots;
     }
 
@@ -482,6 +483,9 @@ class GCNMinRegScheduler2 {
 
     friend class ::GCNMinRegScheduler2;
 
+    simple_ilist<LinkedSU> stripLiveOutDependentInstructions(
+      GCNMinRegScheduler2 &LSUSource);
+
     template <typename Range>
     void mergeSchedule(Range &&R,
                        GCNMinRegScheduler2 &LSUSource);
@@ -497,7 +501,7 @@ class GCNMinRegScheduler2 {
   struct MergeChunk {
     LinkedSU* MergePoint = nullptr;
     decltype(Subgraph::List)::iterator Last;
-    unsigned RP;
+    unsigned NumRegDeps;
   };
 
   const LiveIntervals &LIS;
@@ -715,7 +719,7 @@ class GCNMinRegScheduler2::SGRPTracker2 {
   GCNMinRegScheduler2 &LSUSource;
   Subgraph &SG;
   decltype(Subgraph::List.begin()) CurLSU;
-  unsigned NumRegs = 0;
+  unsigned NumRegs = 0, NumLiveOutRegs = 0;
   decltype(Subgraph::LiveOutRegs) LiveOutRegs;
 
   unsigned getNumLiveOut() const {
@@ -751,7 +755,9 @@ public:
     , SG(SG_)
   {}
 
-  unsigned getPressure() const { return NumRegs; }
+  unsigned getNumRegDeps() const { return NumRegs; }
+
+  unsigned getNumRegLiveOut() const { return NumLiveOutRegs; }
 
   LinkedSU& getCur() const { return *CurLSU; }
 
@@ -759,7 +765,7 @@ public:
 
   void reset() {
     CurLSU = SG.List.begin();
-    NumRegs = getNumLiveOut();
+    NumRegs = NumLiveOutRegs = getNumLiveOut();
     LiveOutRegs = SG.LiveOutRegs;
   }
 
@@ -773,7 +779,8 @@ public:
         TargetRegisterInfo::isVirtualRegister(Op0.getReg())) {
         auto I = LiveOutRegs.find(Op0.getReg());
         if (I != LiveOutRegs.end()) {
-          --NumRegs;
+          assert(NumLiveOutRegs > 0);
+          --NumLiveOutRegs;
           auto &MRI = MI->getMF()->getRegInfo();
           I->second &= ~getDefRegMask(Op0, MRI);
           if (I->second.none())
@@ -836,7 +843,8 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
     }
   }
 
-  const bool Dump = ID == 17;
+  //const bool Dump = ID == 17;
+  const bool Dump = ID == 2;
   //const bool Dump = false;
 
   std::vector<MergeChunk> Chunks(MergePointInfo.size());
@@ -846,7 +854,8 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
   unsigned CurMPIdx = 0;
 
   LLVM_DEBUG(if (Dump) {
-    dbgs() << "NumRegs: " << RPT.getPressure() << '\n';
+    dbgs() << "NumRegs: " << RPT.getNumRegDeps()
+           << ", LO Regs " << RPT.getNumRegLiveOut() << '\n';
   });
 
   while (!RPT.done()) {
@@ -855,7 +864,8 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
 
     LLVM_DEBUG(if (Dump) {
       dbgs() << *CurLSU->getInstr();
-      dbgs() << "NumRegs: " << RPT.getPressure() << '\n';
+      dbgs() << "NumRegs: " << RPT.getNumRegDeps()
+             << ", LO Regs " << RPT.getNumRegLiveOut() << '\n';
     });
 
     auto LowestPredI = MergePointInfo.end();
@@ -885,11 +895,11 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
       auto &C = Chunks[MPInfo.ExecOrder];
       C.MergePoint = LowestPredI->first;
       C.Last = CurLSU.getIterator();
-      C.RP = RPT.getPressure();
+      C.NumRegDeps = RPT.getNumRegDeps();
 
       LLVM_DEBUG(if (Dump) {
         dbgs() << "New merge point after: " << *(*C.MergePoint)->getInstr();
-        dbgs() << "Best NumRegs: " << C.RP << '\n';
+        dbgs() << "Best NumRegs: " << C.NumRegDeps << '\n';
       });
 
       if (MPInfo.ExecOrder < CurMPIdx) { // twist handling
@@ -897,13 +907,13 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
           Chunks[K].MergePoint = nullptr;
       }
       CurMPIdx = MPInfo.ExecOrder;
-    } else if (RPT.getPressure() < Chunks[CurMPIdx].RP) {
+    } else if (RPT.getNumRegDeps() < Chunks[CurMPIdx].NumRegDeps) {
       Chunks[CurMPIdx].Last = CurLSU.getIterator();
-      Chunks[CurMPIdx].RP = RPT.getPressure();
+      Chunks[CurMPIdx].NumRegDeps = RPT.getNumRegDeps();
 
       LLVM_DEBUG(if (Dump && Chunks[CurMPIdx].MergePoint) {
         dbgs() << "add after: " << *(*Chunks[CurMPIdx].MergePoint)->getInstr();
-        dbgs() << "Best NumRegs: " << Chunks[CurMPIdx].RP << '\n';
+        dbgs() << "Best NumRegs: " << Chunks[CurMPIdx].NumRegDeps << '\n';
       });
     }
     LLVM_DEBUG(if (Dump) { dbgs() << '\n'; });
@@ -919,6 +929,50 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
   return ReadyChunks;
 }
 
+
+simple_ilist<GCNMinRegScheduler2::LinkedSU> GCNMinRegScheduler2::Subgraph::
+stripLiveOutDependentInstructions(GCNMinRegScheduler2 &LSUSource) {
+  simple_ilist<LinkedSU> Res;
+  auto &MRI = List.front()->getInstr()->getMF()->getRegInfo();
+  auto LOR = LiveOutRegs;
+  for (auto I = List.begin(), E = List.end(); I != E;) {
+    auto &LSU = *I++;
+    auto &MI = *LSU->getInstr();
+    for (const auto &MO : MI.operands()) {
+      if (!MO.isReg() || !MO.isDef() || !TargetRegisterInfo::isVirtualRegister(MO.getReg()))
+        continue;
+      auto I = LOR.find(MO.getReg());
+      if (I != LOR.end()) {
+        I->second &= ~getDefRegMask(MO, MRI);
+        if (I->second.none())
+          LOR.erase(I);
+      }
+    }
+    bool Strip = true;
+    for (const auto &MO : MI.operands()) {
+      if (!MO.isImm() && !(MO.isReg() && TargetRegisterInfo::isVirtualRegister(MO.getReg()))) {
+        Strip = false;
+        break;
+      }
+      if (!MO.isReg() || !MO.isUse())
+        continue;
+      auto ULM = getUsedRegMask(MO, MRI, LSUSource.LIS);
+      auto I = LOR.find(MO.getReg());
+      if (I == LOR.end() || (I->second & ULM) != ULM) {
+        Strip = false;
+        break;
+      }
+    }
+    if (Strip) {
+      List.remove(LSU);
+      Res.push_back(LSU);
+    }
+    if (LOR.empty())
+      break;
+  }
+  return Res;
+}
+
 template <typename Range>
 void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
                                                   GCNMinRegScheduler2 &LSUSource) {
@@ -926,19 +980,27 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
 
   for (auto *M : Mergees) {
     assert(M->isValidMergeTo(this));
-    auto Begin = M->List.begin();
+
+    auto OutNumRegs = M->getNumBottomRoots();
+
+    auto LODeps = M->stripLiveOutDependentInstructions(LSUSource);
+    List.splice(List.begin(), LODeps);
+
     auto Chunks = M->getMergeChunks(this, LSUSource);
-    auto OutRP = M->getNumBottomRoots();
+    auto Begin = M->List.begin();
     for (auto I = Chunks.begin(), E = Chunks.end(); I != E; ++I) {
       auto &P = *I;
-      while (I != E && I->RP > OutRP)
+      while (I != E && I->NumRegDeps > OutNumRegs)
         ++I;
       auto End = I == E ? List.end() : std::next(I->Last);
       List.splice(P.MergePoint->getIterator(), M->List, Begin, End);
       Begin = End;
+      if (I == E)
+        break;
     }
 
-    List.splice(List.end(), M->List);
+    if (!M->List.empty())
+      List.splice(List.end(), M->List);
     assert(M->List.empty() || (M->dump(dbgs()), false));
   }
 
@@ -1546,6 +1608,7 @@ std::vector<const SUnit*> GCNMinRegScheduler2::finalSchedule() {
 
 void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O,
                                         GCNMinRegScheduler2 *LSUSource) const {
+  auto MergedLiveOutRegs = LiveOutRegs;
   DenseMap<const Subgraph*, unsigned> Level; {
     MergeSet MS;
     for (const auto &LSU : List)
@@ -1560,6 +1623,7 @@ void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O,
           MaxLevel = std::max(MaxLevel, I->second);
       }
       Level[M] = MaxLevel + 1;
+      MergedLiveOutRegs += M->LiveOutRegs;
     }
   }
 
@@ -1567,7 +1631,7 @@ void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O,
   if (LSUSource) {
     GCNUpwardRPTracker RPT(LSUSource->LIS);
     //RPT.addIgnoreRegs(LSUSource->LiveThrRegs);
-    RPT.reset(*List.front()->getInstr(), &LiveOutRegs);
+    RPT.reset(*List.front()->getInstr(), &MergedLiveOutRegs);
     for(const auto &LSU : List) {
       NumVGPRUsed[&LSU] = RPT.getPressure().getVGPRNum();
       RPT.recede(*LSU->getInstr());
@@ -1586,7 +1650,7 @@ void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O,
     if (MI->getNumOperands() > 1) {
       auto &Op0 = MI->getOperand(0);
       if (Op0.isReg() && Op0.isDef() && TargetRegisterInfo::isVirtualRegister(Op0.getReg())) {
-        auto M = LiveOutRegs.lookup(Op0.getReg());
+        auto M = MergedLiveOutRegs.lookup(Op0.getReg());
         auto &MRI = MI->getMF()->getRegInfo();
         if ((M & getDefRegMask(Op0, MRI)).any())
           O << "> ";
@@ -1604,7 +1668,7 @@ static const bool GraphScheduleMode = false;
 
 bool GCNMinRegScheduler2::isExpanded(const Subgraph &R) {
   static const DenseSet<unsigned> Expand =
-   { 0, 1, 16, 17, 19};
+   { 0, 1, 16, 17, 19, 64};
   //{ 1, 2};
 
   return Expand.count(R.ID) > 0 || (R.List.size() <= 2);

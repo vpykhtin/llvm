@@ -274,6 +274,23 @@ public:
   ArrayRef<SUnit*> getBottomRoots() const {
     return BotRoots;
   }
+
+  std::vector<const SUnit*>&& fixSchedule(std::vector<const SUnit*> &&Schedule) {
+    auto Size = Sch.SUnits.size();
+    if (Schedule.size() == Size)
+      return std::move(Schedule);
+
+    BitVector Scheduled(Size);
+    for (auto *SU : Schedule)
+      Scheduled.set(SU->NodeNum);
+
+    Schedule.reserve(Size);
+    for (auto I = Scheduled.find_first_unset(); I != -1;
+              I = Scheduled.find_next_unset(I))
+      Schedule.push_back(&Sch.SUnits[I]);
+
+    return std::move(Schedule);
+  }
 };
 
 class GCNIterativeScheduler::OverrideLegacyStrategy {
@@ -747,10 +764,10 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
     //DEBUG(dumpSUs());
 
     LLVM_DEBUG(dbgs() << "\n=== Begin scheduling " << R->getName(LIS) << '\n');
-    const auto MinSchedule = makeMinRegSchedule2(DAG.getBottomRoots(),
+    const auto MinSchedule = DAG.fixSchedule(makeMinRegSchedule2(DAG.getBottomRoots(),
                                                  getRegionLiveThrough(*R),
                                                  getRegionLiveOuts(*R),
-                                                 *this);
+                                                 *this));
     LLVM_DEBUG(dbgs() << "\n=== End scheduling " << R->getName(LIS) << '\n');
     assert(validateSchedule(*R, MinSchedule));
 
