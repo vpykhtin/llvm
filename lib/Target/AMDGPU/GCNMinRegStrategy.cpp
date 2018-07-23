@@ -1642,7 +1642,6 @@ bool GCNMinRegScheduler2::Subgraph::isValid(const GCNMinRegScheduler2 &LSUSource
       if (Succ.getSUnit()->isBoundaryNode())
         continue;
 
-      auto *SU = Succ.getSUnit();
       auto *SuccParent = LSUSource.getLSU(Succ.getSUnit()).Parent;
       if (SuccParent && SuccParent != this && Succs.count(SuccParent) == 0) {
         dbgs() << "ERROR: SG" << ID << " SU" << LSU->NodeNum
@@ -1910,7 +1909,7 @@ void GCNMinRegScheduler2::writeGraph(StringRef Name) const {
   auto Filename = std::string(Name);
 
   std::error_code EC;
-  raw_fd_ostream FS(Filename, EC, sys::fs::OpenFlags::F_Text | sys::fs::OpenFlags::F_RW);
+  raw_fd_ostream FS(Filename, EC, sys::fs::OpenFlags::F_Text);
   if (EC) {
     errs() << "Error opening " << Filename << " file: " << EC.message() << '\n';
     return;

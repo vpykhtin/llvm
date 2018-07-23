@@ -941,7 +941,7 @@ void GCNIterativeScheduler::writeGraph(StringRef Name) {
   fixFilename(Filename);
 
   std::error_code EC;
-  raw_fd_ostream FS(Filename, EC, sys::fs::OpenFlags::F_Text | sys::fs::OpenFlags::F_RW);
+  raw_fd_ostream FS(Filename, EC, sys::fs::OpenFlags::F_Text);
   if (EC) {
     errs() << "Error opening " << Filename  << " file: " << EC.message() << '\n';
     return;
@@ -954,7 +954,7 @@ void writeSubtreeGraph(const SchedDFSResult2 &R, StringRef Name) {
   fixFilename(Filename);
 
   std::error_code EC;
-  raw_fd_ostream FS(Filename, EC, sys::fs::OpenFlags::F_Text | sys::fs::OpenFlags::F_RW);
+  raw_fd_ostream FS(Filename, EC, sys::fs::OpenFlags::F_Text);
   if (EC) {
     errs() << "Error opening " << Filename << " file: " << EC.message() << '\n';
     return;
