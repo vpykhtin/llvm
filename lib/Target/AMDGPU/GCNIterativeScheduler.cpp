@@ -240,7 +240,7 @@ const {
   O << "dag." << getBB()->getParent()->getName() 
     << ".BB" << getBB()->getNumber() << '.'
     << LIS->getInstructionIndex(*Begin) << '-'
-    << LIS->getInstructionIndex(*End);
+    << LIS->getInstructionIndex(*getLastMI());
   return O.str();
 }
 

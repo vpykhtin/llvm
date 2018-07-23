@@ -297,12 +297,14 @@ class GCNMinRegScheduler2 {
     const SUnit * const SU;
     Subgraph *Parent = nullptr;
     unsigned SGOrderIndex;
-    bool hasExternalSuccs : 1;
+    bool hasExternalDataSuccs : 1; // true if this SU has data consumers in other SGs
 
     const SUnit *operator->() const { return SU; }
     const SUnit *operator->() { return SU; }
 
-    LinkedSU(const SUnit &SU_) : SU(&SU_), hasExternalSuccs(false) {}
+    LinkedSU(const SUnit &SU_) : SU(&SU_), hasExternalDataSuccs(false) {}
+    LinkedSU(const LinkedSU&) = delete;
+    LinkedSU(LinkedSU&&) = delete;
 
     unsigned getNodeNum() const {
       assert(!SU->isBoundaryNode());
@@ -376,6 +378,8 @@ class GCNMinRegScheduler2 {
 
     bool empty() const { return List.empty(); }
 
+    bool isValid(const GCNMinRegScheduler2 &LSUSource) const;
+
     GCNRegPressure getLiveOutPressure() const {
       return getRegPressure(getBottomSU()->getInstr()->getMF()->getRegInfo(),
                             LiveOutRegs);
@@ -384,14 +388,14 @@ class GCNMinRegScheduler2 {
     unsigned getNumLiveOut() const {
       unsigned NumLiveOut = 0;
       for (auto &LSU : List)
-        NumLiveOut += LSU.hasExternalSuccs ? 1 : 0;
+        NumLiveOut += LSU.hasExternalDataSuccs ? 1 : 0;
       return NumLiveOut;
     }
 
     unsigned getNumBottomRoots() const {
       unsigned NumBottomRoots = 0;
       for (auto &LSU : List) {
-        if (LSU.hasExternalSuccs) continue;
+        if (LSU.hasExternalDataSuccs) continue;
         bool hasSucc = false;
         for (auto &Succ : LSU->Succs) {
           if (!Succ.getSUnit()->isBoundaryNode()) {
@@ -613,16 +617,22 @@ void GCNMinRegScheduler2::Subgraph::commitMerge(Range &&Mergees,
   for (auto &LSU : List)
     LSU.Parent = this;
 
-  // patch hasExternalSuccs flag
+  // patch hasExternalDataSuccs flag
   for (auto &LSU : List) {
-    if (!LSU.hasExternalSuccs)
+    if (!LSU.hasExternalDataSuccs)
       continue;
-    LSU.hasExternalSuccs = false;
-    for (const auto &Succ : LSU->Succs)
-      if (LSUSource.getLSU(Succ.getSUnit()).Parent != this) {
-        LSU.hasExternalSuccs = true;
+    LSU.hasExternalDataSuccs = false;
+    for (const auto &Succ : LSU->Succs) {
+      auto *SU = Succ.getSUnit();
+      if (SU->isBoundaryNode() || !Succ.isAssignedRegDep())
+        continue;
+
+      auto *SuccParent = LSUSource.getLSU(SU).Parent;
+      if (SuccParent && SuccParent != this) {
+        LSU.hasExternalDataSuccs = true;
         break;
       }
+    }
   }
 
   for (auto *Mergee : Mergees) {
@@ -631,6 +641,8 @@ void GCNMinRegScheduler2::Subgraph::commitMerge(Range &&Mergees,
 
     patchDepsAfterMerge(Mergee);
   }
+
+  assert(isValid(LSUSource));
 }
 
 void GCNMinRegScheduler2::Subgraph::patchDepsAfterMerge(Subgraph *Mergee) {
@@ -829,7 +841,7 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
   DenseMap<LinkedSU*, Info> MergePointInfo; {
     unsigned ExecOrder = 0; // actually inverted order
     for (auto &LSU : MergeTo->List) {
-      if (!LSU.hasExternalSuccs)
+      if (!LSU.hasExternalDataSuccs)
         continue;
 
       unsigned NumSuccs = 0;
@@ -842,10 +854,12 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
         MergePointInfo[&LSU] = { ExecOrder++, NumSuccs };
     }
   }
+  if (MergePointInfo.empty())
+    return std::vector<GCNMinRegScheduler2::MergeChunk>();
 
   //const bool Dump = ID == 17;
-  const bool Dump = ID == 2;
-  //const bool Dump = false;
+  //const bool Dump = ID == 2;
+  const bool Dump = false;
 
   std::vector<MergeChunk> Chunks(MergePointInfo.size());
   SGRPTracker2 RPT(LSUSource, *this);
@@ -874,7 +888,7 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
         continue;
 
       auto &MPLSU = LSUSource.getLSU(Pred.getSUnit());
-      if (!MPLSU.hasExternalSuccs)
+      if (!MPLSU.hasExternalDataSuccs)
         continue;
 
       auto I = MergePointInfo.find(&MPLSU);
@@ -992,7 +1006,7 @@ void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
       auto &P = *I;
       while (I != E && I->NumRegDeps > OutNumRegs)
         ++I;
-      auto End = I == E ? List.end() : std::next(I->Last);
+      auto End = I == E ? M->List.end() : std::next(I->Last);
       List.splice(P.MergePoint->getIterator(), M->List, Begin, End);
       Begin = End;
       if (I == E)
@@ -1141,7 +1155,8 @@ void GCNMinRegScheduler2::discoverSubgraph(Subgraph &SG) {
         auto Reg = P.isAssignedRegDep() ? P.getReg() : 0;
         SG.Preds[LSU.Parent].insert(Reg);
         LSU.Parent->Succs[&SG].insert(Reg);
-        LSU.hasExternalSuccs = true;
+        if (Reg)
+          LSU.hasExternalDataSuccs = true;
       }
     }
   } while (!Worklist.empty());
@@ -1276,7 +1291,7 @@ void GCNMinRegScheduler2::Subgraph::insertMerges(MergeInfo &Merges,
   if (Succs.empty()) return;
   MergeSet MS;
   for (auto &LSU : List) {
-    if (!LSU.hasExternalSuccs) continue;
+    if (!LSU.hasExternalDataSuccs) continue;
     const auto &LSUSuccs = LSU.SU->Succs;
     for (const auto &Succ : LSUSuccs) {
       if (!Succ.isAssignedRegDep())
@@ -1318,16 +1333,20 @@ GCNMinRegScheduler2::MergeInfo GCNMinRegScheduler2::getMultiTierMerges() {
       return SG1.getNumLiveOut() < SG2.getNumLiveOut();
   });
   MergeInfo Merges;
-  if (auto N = MaxI->getNumLiveOut()) {
-    MergeSet MS = { &*MaxI };
-    for (auto &Succ : MaxI->Succs)
+  auto &Center = *MaxI;
+  if (auto N = Center.getNumLiveOut()) {
+    assert(!Center.Succs.empty());
+    MergeSet MS = { &Center };
+    for (auto &Succ : Center.Succs)
       MS.Mergees.insert(Succ.first);
     Merges.emplace(std::move(MS), N);
   }
+  removeInefficientMerges(Merges);
   return Merges;
 }
 
 bool GCNMinRegScheduler2::tryMerge(const MergeSet &MS) {
+  assert(!MS.Mergees.empty());
   auto LiveOutRegs = MS.getLiveOutRegs();
   GCNUpwardRPTracker RT(LIS);
 
@@ -1456,9 +1475,9 @@ private:
       if (I1.Priority != I2.Priority)
         return I1.Priority < I2.Priority;
 
-      if (I1.LSU->hasExternalSuccs != I2.LSU->hasExternalSuccs)
-        return I1.LSU->hasExternalSuccs > I2.LSU->hasExternalSuccs;
-      else if (I1.LSU->hasExternalSuccs)
+      if (I1.LSU->hasExternalDataSuccs != I2.LSU->hasExternalDataSuccs)
+        return I1.LSU->hasExternalDataSuccs > I2.LSU->hasExternalDataSuccs;
+      else if (I1.LSU->hasExternalDataSuccs)
         return (*I1.LSU)->Succs.size() > (*I2.LSU)->Succs.size();
 
       const auto SUNum1 = SGS.SethiUllmanNumbers[I1.LSU->getNodeNum()];
@@ -1605,6 +1624,60 @@ std::vector<const SUnit*> GCNMinRegScheduler2::finalSchedule() {
 
 ///////////////////////////////////////////////////////////////////////////////
 // Dumping
+
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+LLVM_DUMP_METHOD
+bool GCNMinRegScheduler2::Subgraph::isValid(const GCNMinRegScheduler2 &LSUSource) const {
+  bool Res = true;
+  for (const auto &LSU : List) {
+
+    if (LSU.Parent != this) {
+      dbgs() << "ERROR: SG" << ID << " SU" << LSU->NodeNum
+             << " has invalid parent\n";
+      Res = false;
+    }
+
+    bool hasExternalDataSuccs = false;
+    for (const auto &Succ : LSU->Succs) {
+      if (Succ.getSUnit()->isBoundaryNode())
+        continue;
+
+      auto *SU = Succ.getSUnit();
+      auto *SuccParent = LSUSource.getLSU(Succ.getSUnit()).Parent;
+      if (SuccParent && SuccParent != this && Succs.count(SuccParent) == 0) {
+        dbgs() << "ERROR: SG" << ID << " SU" << LSU->NodeNum
+               << "'s successors's parent SG" << SuccParent->ID
+               << " ins't found in the successors\n";
+        Res = false;
+      }
+
+      if (SuccParent && SuccParent != this && Succ.isAssignedRegDep())
+        hasExternalDataSuccs = true;
+    }
+
+    if (LSU.hasExternalDataSuccs != hasExternalDataSuccs) {
+      dbgs() << "ERROR: SG" << ID << " SU" << LSU->NodeNum
+             << (LSU.hasExternalDataSuccs ? "has" : " doesn't have")
+             << "hasExternalDataSuccs flag\n";
+      Res = false;
+    }
+
+    for (const auto &Pred : LSU->Preds) {
+      if (Pred.getSUnit()->isBoundaryNode())
+        continue;
+
+      auto *PredParent = LSUSource.getLSU(Pred.getSUnit()).Parent;
+      if (PredParent != this && Preds.count(PredParent) == 0) {
+        dbgs() << "ERROR: SG" << ID << " SU" << LSU->NodeNum
+               << "'s predecessors's parent SG" << PredParent->ID
+               << " ins't found in the predecessors\n";
+        Res = false;
+      }
+    }
+  }
+  return Res;
+}
+#endif
 
 void GCNMinRegScheduler2::Subgraph::dump(raw_ostream &O,
                                         GCNMinRegScheduler2 *LSUSource) const {
@@ -1754,16 +1827,15 @@ unsigned GCNMinRegScheduler2::getExternalConsumersNum(const LinkedSU &LSU) const
 }
 
 void GCNMinRegScheduler2::writeLSU(raw_ostream &O, const LinkedSU &LSU) const {
-  auto NumCons = getExternalConsumersNum(LSU);
   const auto &SU = *LSU.SU;
   O << "\t\t";
   O << "SU" << SU.NodeNum
     << " [shape = record, style = \"filled\", rank="
     << (GraphScheduleMode ? LSU.SGOrderIndex : getUnitDepth(SU));
-  if (NumCons > 0)
+  if (LSU.hasExternalDataSuccs)
     O << ", color = green";
   O << ", label = \"{SU" << SU.NodeNum;
-  if (NumCons > 0)
+  if (auto NumCons = getExternalConsumersNum(LSU))
     O << " C(" << NumCons << ')';
   O << '|';
   SU.getInstr()->print(O, /*IsStandalone=*/ false, /*SkipOpers=*/true);

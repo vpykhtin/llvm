@@ -101,6 +101,10 @@ protected:
     std::string getName(const LiveIntervals *LIS) const;
 
     const MachineBasicBlock *getBB() const { return Begin->getParent(); }
+
+    MachineBasicBlock::iterator getLastMI() const {
+      return End == getBB()->end() ? std::prev(End) : End;
+    }
   };
 
   SpecificBumpPtrAllocator<Region> Alloc;
