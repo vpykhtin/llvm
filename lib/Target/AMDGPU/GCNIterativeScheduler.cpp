@@ -659,16 +659,33 @@ unsigned GCNIterativeScheduler::tryMaximizeOccupancy(unsigned TargetOcc) {
                printLivenessInfo(dbgs(), R->Begin, R->End, LIS));
 
     BuildDAG DAG(*R, *this);
-    const auto MinSchedule = makeMinRegSchedule(DAG.getTopRoots(), *this);
-    const auto MaxRP = getSchedulePressure(*R, MinSchedule);
-    LLVM_DEBUG(dbgs() << "Occupancy improvement attempt:\n";
-               printSchedRP(dbgs(), R->MaxPressure, MaxRP));
+    const auto MinSchedule1 = DAG.fixSchedule(makeMinRegSchedule(DAG.getTopRoots(), *this));
+    const auto MaxRP1 = getSchedulePressure(*R, MinSchedule1);
+    LLVM_DEBUG(dbgs() << "Occupancy improvement attempt (minreg):\n";
+               printSchedRP(dbgs(), R->MaxPressure, MaxRP1));
 
-    NewOcc = std::min(NewOcc, MaxRP.getOccupancy(ST));
+    if (DAG.getBottomRoots().size() > 1) {
+      const auto MinSchedule2 = DAG.fixSchedule(
+        makeMinRegSchedule2(DAG.getBottomRoots(),
+                            getRegionLiveThrough(*R),
+                            getRegionLiveOuts(*R),
+                            *this));
+      const auto MaxRP2 = getSchedulePressure(*R, MinSchedule2);
+      LLVM_DEBUG(dbgs() << "Occupancy improvement attempt (minreg2):\n";
+      printSchedRP(dbgs(), R->MaxPressure, MaxRP2));
+
+      if (MaxRP2.less(ST, MaxRP1) && MaxRP2.getOccupancy(ST) >= NewOcc) {
+        NewOcc = MaxRP2.getOccupancy(ST);
+        setBestSchedule(*R, MinSchedule2, MaxRP2);
+        continue;
+      }
+    }
+
+    NewOcc = std::min(NewOcc, MaxRP1.getOccupancy(ST));
     if (NewOcc <= Occ)
       break;
 
-    setBestSchedule(*R, MinSchedule, MaxRP);
+    setBestSchedule(*R, MinSchedule1, MaxRP1);
   }
   LLVM_DEBUG(dbgs() << "New occupancy = " << NewOcc
                     << ", prev occupancy = " << Occ << '\n');
@@ -757,12 +774,6 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
       break;
 
     BuildDAG DAG(*R, *this);
-    //computeDFSResult();
-    //DEBUG(writeGraph(R->getName(LIS)));
-    //DEBUG(writeSubtreeGraph(*static_cast<SchedDFSResult2*>(DFSResult), R->getName(LIS)));
-
-    //DEBUG(dumpSUs());
-
     LLVM_DEBUG(dbgs() << "\n=== Begin scheduling " << R->getName(LIS) << '\n');
     const auto MinSchedule = DAG.fixSchedule(makeMinRegSchedule2(DAG.getBottomRoots(),
                                                  getRegionLiveThrough(*R),
