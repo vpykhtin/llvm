@@ -130,6 +130,18 @@ struct MachineSchedContext {
   virtual ~MachineSchedContext();
 };
 
+/// Base class for a machine scheduler class that can run at any point.
+class MachineSchedulerBase : public MachineSchedContext,
+  public MachineFunctionPass {
+public:
+  MachineSchedulerBase(char &ID) : MachineFunctionPass(ID) {}
+
+  void print(raw_ostream &O, const Module* = nullptr) const override;
+
+protected:
+  void scheduleRegions(ScheduleDAGInstrs &Scheduler, bool FixKillFlags);
+};
+
 /// MachineSchedRegistry provides a selection of available machine instruction
 /// schedulers.
 class MachineSchedRegistry : public MachinePassRegistryNode {

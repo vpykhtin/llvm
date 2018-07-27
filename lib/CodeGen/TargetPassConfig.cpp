@@ -1056,6 +1056,10 @@ void TargetPassConfig::addFastRegAlloc(FunctionPass *RegAllocPass) {
     addPass(RegAllocPass);
 }
 
+namespace llvm {
+  MachineFunctionPass* createPreRCMachineScheduler();
+}
+
 /// Add standard target-independent passes that are tightly coupled with
 /// optimized register allocation, including coalescing, machine instruction
 /// scheduling, and register allocation itself.
@@ -1080,11 +1084,8 @@ void TargetPassConfig::addOptimizedRegAlloc(FunctionPass *RegAllocPass) {
   if (EarlyLiveIntervals)
     addPass(&LiveIntervalsID, false);
 
-#define EARLY_SCHED
-#ifdef EARLY_SCHED
   addPass(&RenameIndependentSubregsID);
-  addPass(&MachineSchedulerID);
-#endif
+  addPass(llvm::createPreRCMachineScheduler());
 
   addPass(&TwoAddressInstructionPassID, false);
   addPass(&RegisterCoalescerID);
@@ -1094,10 +1095,8 @@ void TargetPassConfig::addOptimizedRegAlloc(FunctionPass *RegAllocPass) {
   // separate vregs before. Splitting can also improve reg. allocation quality.
   addPass(&RenameIndependentSubregsID);
 
-#ifndef EARLY_SCHED
   // PreRA instruction scheduling.
   addPass(&MachineSchedulerID);
-#endif
 
   if (RegAllocPass) {
     // Add the selected register allocation pass.

@@ -17,9 +17,11 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/RegisterPressure.h"
 #include "llvm/CodeGen/ScheduleDAG.h"
+#include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
@@ -197,11 +199,24 @@ bool GCNIterativeScheduler::validateSchedule(const Region &R,
 
   bool Res = true;
   unsigned NumInstr = 0;
-  for (const auto *SU : Schedule) {
+  for (auto I = Schedule.begin(), E = Schedule.end(); I != E; ++I) {
+    const auto *SU = *I;
     ++NumInstr;
     if (NumPreds[SU->NodeNum] != 0) {
-      dbgs() << "ERROR: unsatisfied preds: " << NumPreds[SU->NodeNum] << ' ';
-      SU->getInstr()->print(dbgs());
+      dbgs() << "ERROR: unsatisfied preds: " << NumPreds[SU->NodeNum] << ' ' << *SU->getInstr();
+      for (auto &P : SU->Preds) {
+        bool Met = false;
+        for (auto J = Schedule.begin(); J != I; ++J) {
+          if (P.getSUnit()->NodeNum == (*J)->NodeNum) {
+            Met = true;
+            break;
+          }
+        }
+        if (!Met) {
+          dbgs() << "  Missing pred: SU" << P.getSUnit()->NodeNum
+                 << ' ' << *P.getSUnit()->getInstr();
+        }
+      }
       Res = false;
     }
     for (const auto &Succ : SU->Succs) {
@@ -224,9 +239,8 @@ bool GCNIterativeScheduler::validateSchedule(const Region &R,
     for(const auto &P : IC)
       if (P.second == 1) {
         dbgs() << "Missing " << *P.first;
-        //P.first->print(dbgs());
       }
-    //Res = false; // TODO: uncomment this
+    Res = false; // TODO: uncomment this
   }
   return Res;
 }
@@ -999,6 +1013,79 @@ void writeSubtreeGraph(const SchedDFSResult2 &R, StringRef Name) {
   O << "}\n";
 }
 
+namespace {
+
+  /// MachineScheduler runs after coalescing and before register allocation.
+class PreRCMachineScheduler : public MachineSchedulerBase {
+  public:
+    PreRCMachineScheduler();
+
+    void getAnalysisUsage(AnalysisUsage &AU) const override;
+
+    bool runOnMachineFunction(MachineFunction&) override;
+
+    static char ID; // Class identification, replacement for typeinfo
+  };
+
+} // end anonymous namespace
+
+char PreRCMachineScheduler::ID = 0;
+
+void initializePreRCMachineSchedulerPass(PassRegistry&);
+
+INITIALIZE_PASS_BEGIN(PreRCMachineScheduler, "prercmisched",
+  "Pre Reg Coalescer Machine Instruction Scheduler", false, false)
+  INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+  INITIALIZE_PASS_DEPENDENCY(MachineLoopInfo)
+  INITIALIZE_PASS_DEPENDENCY(SlotIndexes)
+  INITIALIZE_PASS_DEPENDENCY(LiveIntervals)
+INITIALIZE_PASS_END(PreRCMachineScheduler, "prercmisched",
+  "Pre Reg Coalescer Machine Instruction Scheduler", false, false)
+
+PreRCMachineScheduler::PreRCMachineScheduler() : MachineSchedulerBase(ID) {
+  initializePreRCMachineSchedulerPass(*PassRegistry::getPassRegistry());
+}
+
+void PreRCMachineScheduler::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.setPreservesCFG();
+  AU.addRequiredID(MachineDominatorsID);
+  AU.addRequired<MachineLoopInfo>();
+  AU.addRequired<AAResultsWrapperPass>();
+  AU.addRequired<TargetPassConfig>();
+  AU.addRequired<SlotIndexes>();
+  AU.addPreserved<SlotIndexes>();
+  AU.addRequired<LiveIntervals>();
+  AU.addPreserved<LiveIntervals>();
+  MachineFunctionPass::getAnalysisUsage(AU);
+}
+
+bool PreRCMachineScheduler::runOnMachineFunction(MachineFunction &mf) {
+  if (skipFunction(mf.getFunction()))
+    return false;
+
+  // Initialize the context of the pass.
+  MF = &mf;
+  MLI = &getAnalysis<MachineLoopInfo>();
+  MDT = &getAnalysis<MachineDominatorTree>();
+  PassConfig = &getAnalysis<TargetPassConfig>();
+  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
+
+  LIS = &getAnalysis<LiveIntervals>();
+
+  LLVM_DEBUG(dbgs() << "Running minregonly\n");
+
+  // Instantiate the selected scheduler for this target, function, and
+  // optimization level.
+  std::unique_ptr<ScheduleDAGInstrs> Scheduler(
+    new GCNIterativeScheduler(this, GCNIterativeScheduler::SCHEDULE_MINREGONLY));
+  scheduleRegions(*Scheduler, false);
+
+  return true;
+}
+
+MachineFunctionPass* createPreRCMachineScheduler() {
+  return new PreRCMachineScheduler();
+}
 
 } // end namespace llvm
 

@@ -291,12 +291,10 @@ class GCNMinRegScheduler2 {
   class ReadyPredTracker;
   class SGRPTracker;
   class SGRPTracker2;
-  struct LSUExecOrder;
 
   struct LinkedSU : ilist_node<LinkedSU> {
     const SUnit * const SU;
     Subgraph *Parent = nullptr;
-    unsigned SGOrderIndex;
     bool hasExternalDataSuccs : 1; // true if this SU has data consumers in other SGs
 
     const SUnit *operator->() const { return SU; }
@@ -313,8 +311,6 @@ class GCNMinRegScheduler2 {
 
     bool dependsOn(const Subgraph &SG,
                    const GCNMinRegScheduler2 &LSUSource) const;
-
-    bool areAllSuccessorsInSubgraphs(const GCNMinRegScheduler2 &LSUSource) const;
 
     void print(raw_ostream &OS) const {
       OS << "SU" << getNodeNum() << ": ";
@@ -450,22 +446,8 @@ class GCNMinRegScheduler2 {
                       const Set &Tier,
                       const GCNMinRegScheduler2 &LSUSource);
 
-#if 0
-    using LSURange = decltype(make_range(List.begin(),List.end()));
-
-    std::map<LinkedSU*, LSURange, LSUExecOrder>
-      getMergeChunks(Subgraph *MergeTo, GCNMinRegScheduler2 &LSUSource);
-
-#else
     std::vector<MergeChunk> getMergeChunks(Subgraph *MergeTo,
                                            GCNMinRegScheduler2 &LSUSource);
-#endif
-
-    void updateOrderIndexes() {
-      unsigned I = 0;
-      for (auto &LSU : List)
-        LSU.SGOrderIndex = I++;
-    }
 
     void dump(raw_ostream &O, GCNMinRegScheduler2 *LSUSource = nullptr) const;
 
@@ -574,15 +556,6 @@ bool GCNMinRegScheduler2::LinkedSU::dependsOn(const Subgraph &SG,
       return true;
   }
   return false;
-}
-
-bool GCNMinRegScheduler2::LinkedSU::areAllSuccessorsInSubgraphs(
-  const GCNMinRegScheduler2 &LSUSource) const {
-  for (auto &S : SU->Succs)
-    if (!S.isWeak() && !S.getSUnit()->isBoundaryNode() &&
-        !LSUSource.getLSU(S.getSUnit()).Parent)
-      return false;
-  return true;
 }
 
 // return true if SG1 should be placed before SG2
@@ -823,16 +796,6 @@ public:
   }
 };
 
-struct GCNMinRegScheduler2::LSUExecOrder {
-  bool operator()(const LinkedSU *LSU1, const LinkedSU *LSU2) {
-    // SGOrderIndex indexes are numbered from the bottom of a schedule
-    // so execution order is a reverse
-    return (LSU1 != nullptr && LSU2 != nullptr) ?
-      (LSU1->SGOrderIndex > LSU2->SGOrderIndex) :
-      (LSU1 < LSU2); // put nullptr to the top
-  }
-};
-
 std::vector<GCNMinRegScheduler2::MergeChunk>
 GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
                                               GCNMinRegScheduler2 &LSUSource) {
@@ -992,8 +955,6 @@ stripLiveOutDependentInstructions(GCNMinRegScheduler2 &LSUSource) {
 template <typename Range>
 void GCNMinRegScheduler2::Subgraph::mergeSchedule(Range &&Mergees,
                                                   GCNMinRegScheduler2 &LSUSource) {
-  updateOrderIndexes();
-
   for (auto *M : Mergees) {
     assert(M->isValidMergeTo(this));
 
@@ -1116,11 +1077,10 @@ GCNMinRegScheduler2::GCNMinRegScheduler2(
 std::vector<const SUnit*> GCNMinRegScheduler2::schedule() {
   for (auto &R : Subgraphs) {
     scheduleSG(R);
-    R.updateOrderIndexes();
     //DEBUG(R.dump(dbgs()));
   }
 
-  //merge();
+  merge();
 
   return finalSchedule();
 }
@@ -1166,16 +1126,12 @@ void GCNMinRegScheduler2::discoverSubgraphs(ArrayRef<const SUnit*> BotRoots) {
   std::priority_queue<const SUnit*, std::vector<const SUnit*>, deepestFirst>
     Roots(BotRoots.begin(), BotRoots.end(), deepestFirst(*this));
 
-  SGStorage.reserve(2 * BotRoots.size());
+  SGStorage.reserve(BotRoots.size());
   unsigned SubGraphID = 0;
-  std::set<const LinkedSU*> PostProcessCtrlDeps;
 
   while (!Roots.empty()) {
     auto &LSU = getLSU(Roots.top());
     Roots.pop();
-
-    if (LSU.Parent)
-      continue; // already in some SG
 
     SGStorage.emplace_back(SubGraphID++, LSU, LiveOutRegs, MRI);
     auto &SG = SGStorage.back();
@@ -1193,45 +1149,19 @@ void GCNMinRegScheduler2::discoverSubgraphs(ArrayRef<const SUnit*> BotRoots) {
           continue;
 
         auto &LSU = getLSU(P.getSUnit());
-        if (!P.isAssignedRegDep()) {
-          // control dependency
-          if (!LSU.Parent) {
-            if (LSU.areAllSuccessorsInSubgraphs(*this))
-              Roots.push(LSU.SU);
-            PostProcessCtrlDeps.insert(&LSU);
-          } else if (LSU.Parent != &SG) {
-            SG.Preds[LSU.Parent].insert(0); // 0 means control dep
-            LSU.Parent->Succs[&SG].insert(0);
-          }
-          continue;
-        }
-
-        // data dependency - continue traversing tree
         if (!LSU.Parent) {
           SG.add(LSU, LiveOutRegs, MRI);
           Worklist.push_back(LSU.SU);
         }
         else if (LSU.Parent != &SG) { // cross edge detected
-          auto Reg = P.getReg();
+          auto Reg = P.isAssignedRegDep() ? P.getReg() : 0;
           SG.Preds[LSU.Parent].insert(Reg);
           LSU.Parent->Succs[&SG].insert(Reg);
-          LSU.hasExternalDataSuccs = true;
+          if (Reg)
+            LSU.hasExternalDataSuccs = true;
         }
       }
     } while (!Worklist.empty());
-  }
-
-  for (auto *LSU : PostProcessCtrlDeps) {
-    for (auto &S : (*LSU)->Succs) {
-      if (S.isAssignedRegDep() || S.getSUnit()->isBoundaryNode())
-        continue;
-      // only control deps
-      auto &SuccLSU = getLSU(S.getSUnit());
-      if (LSU->Parent != SuccLSU.Parent) {
-        SuccLSU.Parent->Preds[LSU->Parent].insert(0);
-        LSU->Parent->Succs[SuccLSU.Parent].insert(0);
-      }
-    }
   }
 #ifndef NDEBUG
   for (auto &SG : Subgraphs)
@@ -1484,18 +1414,6 @@ void GCNMinRegScheduler2::merge() {
     }
     LLVM_DEBUG(writeGraph((Twine("subdags_merged") + Twine(I++) + ".dot").str()));
   }
-#endif
-
-#if 0
-  Subgraph::MergeSet S1 = { &SGStorage[0], { &SGStorage[19] } };
-  OneTierMerge(S1, *this);
-
-  Subgraph::MergeSet S2 = { &SGStorage[0], { } };
-  for (auto &Succ : SGStorage[0].Succs)
-    S2.Mergees.insert(Succ.first);
-
-  OneTierMerge(S2, *this);
-  //SG0.dump(dbgs());
 #endif
 }
 
