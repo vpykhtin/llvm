@@ -1084,8 +1084,10 @@ void TargetPassConfig::addOptimizedRegAlloc(FunctionPass *RegAllocPass) {
   if (EarlyLiveIntervals)
     addPass(&LiveIntervalsID, false);
 
+#if 1
   addPass(&RenameIndependentSubregsID);
   addPass(llvm::createPreRCMachineScheduler());
+#endif
 
   addPass(&TwoAddressInstructionPassID, false);
   addPass(&RegisterCoalescerID);

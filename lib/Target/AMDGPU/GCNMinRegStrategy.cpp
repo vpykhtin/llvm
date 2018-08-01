@@ -801,22 +801,27 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
                                               GCNMinRegScheduler2 &LSUSource) {
   struct Info {
     unsigned ExecOrder;
-    unsigned NumSuccs;
+    unsigned NumDataSuccs;
   };
   DenseMap<LinkedSU*, Info> MergePointInfo; {
     unsigned ExecOrder = 0; // actually inverted order
     for (auto &LSU : MergeTo->List) {
-      if (!LSU.hasExternalDataSuccs)
-        continue;
+      //if (!LSU.hasExternalDataSuccs)
+      //  continue;
 
-      unsigned NumSuccs = 0;
+      unsigned NumDataSuccs = 0;
+      bool HasCtrlSuccs = false;
       for (const auto &Succ : LSU->Succs) {
-        if (Succ.isAssignedRegDep() &&
-          LSUSource.getLSU(Succ.getSUnit()).Parent == this)
-          ++NumSuccs;
+        if (Succ.isWeak() || Succ.getSUnit()->isBoundaryNode() ||
+            LSUSource.getLSU(Succ.getSUnit()).Parent != this)
+          continue;
+        if (Succ.isAssignedRegDep())
+          ++NumDataSuccs;
+        else
+          HasCtrlSuccs = true;
       }
-      if (NumSuccs)
-        MergePointInfo[&LSU] = { ExecOrder++, NumSuccs };
+      if (NumDataSuccs || HasCtrlSuccs)
+        MergePointInfo[&LSU] = { ExecOrder++, NumDataSuccs };
     }
   }
   if (MergePointInfo.empty())
@@ -849,20 +854,24 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
 
     auto LowestPredI = MergePointInfo.end();
     for (const auto &Pred : CurLSU->Preds) {
-      if (!Pred.isAssignedRegDep())
+      if (Pred.isWeak() || Pred.getSUnit()->isBoundaryNode())
         continue;
 
+      //if (!MPLSU.hasExternalDataSuccs)
+      //  continue;
+
       auto &MPLSU = LSUSource.getLSU(Pred.getSUnit());
-      if (!MPLSU.hasExternalDataSuccs)
+      if (MPLSU.Parent != MergeTo)
         continue;
 
       auto I = MergePointInfo.find(&MPLSU);
-      if (I == MergePointInfo.end())
-        continue;
+      assert(I != MergePointInfo.end());
 
-      assert(I->second.NumSuccs);
-      if (--I->second.NumSuccs != 0)
-        continue;
+      if (Pred.isAssignedRegDep()) {
+        assert(I->second.NumDataSuccs);
+        if (--I->second.NumDataSuccs != 0)
+          continue;
+      }
 
       if (LowestPredI == MergePointInfo.end() ||
           LowestPredI->second.ExecOrder > I->second.ExecOrder)
@@ -941,6 +950,14 @@ stripLiveOutDependentInstructions(GCNMinRegScheduler2 &LSUSource) {
         Strip = false;
         break;
       }
+    }
+    if (Strip) {
+      // check if this liveout is also used by consecuent instructions
+      for (auto &S : LSU->Succs)
+        if (!S.isWeak() && !S.getSUnit()->isBoundaryNode()) {
+          Strip = false;
+          break;
+        }
     }
     if (Strip) {
       List.remove(LSU);

@@ -160,7 +160,7 @@ LLVM_DUMP_METHOD
 void GCNIterativeScheduler::printRegions(raw_ostream &OS) const {
   const auto &ST = MF.getSubtarget<GCNSubtarget>();
   for (const auto R : Regions) {
-    OS << "Region to schedule ";
+    OS << "\nRegion to schedule ";
     printRegion(OS, R->Begin, R->End, LIS, 1);
     printLivenessInfo(OS, R->Begin, R->End, LIS);
     OS << "Max RP: ";
@@ -777,7 +777,7 @@ void GCNIterativeScheduler::scheduleMinReg(bool force) {
   auto MaxPressure = Regions.front()->MaxPressure;
   for (auto *R : Regions) {
     LLVM_DEBUG(
-      dbgs() << "Scheduling\n";
+      dbgs() << "\nScheduling minreg\n";
       printLivenessInfo(dbgs(), R->Begin, R->End, LIS);
       dbgs() << "RP: ";
       R->MaxPressure.print(dbgs(), &ST);
