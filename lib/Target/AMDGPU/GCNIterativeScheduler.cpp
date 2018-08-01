@@ -599,52 +599,48 @@ void GCNIterativeScheduler::computeDFSResult() {
 }
 
 void GCNIterativeScheduler::removeM0Defs(MachineBasicBlock &BB) {
-  DenseMap<int64_t, const MachineInstr*> M0Def;
-  const MachineInstr *CurM0Def = nullptr;
+  DenseMap<int64_t, MachineInstr*> M0Def;
+  MachineInstr *CurM0Def = nullptr;
   for (auto I = BB.begin(), E = BB.end(); I != E;) {
     auto &MI = *I++;
-    if (MI.getOpcode() == AMDGPU::S_MOV_B32 &&
-      MI.getOperand(0).getReg() == AMDGPU::M0) {
-      const auto &Op1 = MI.getOperand(1);
-      if (Op1.isImm()) {
-        auto R = M0Def.try_emplace(Op1.getImm(), &MI);
-        if (CurM0Def)
-          R.second ? MI.removeFromParent() : MI.eraseFromParent();
+
+    if (MI.modifiesRegister(AMDGPU::M0, TRI)) {
+      CurM0Def = nullptr;
+      if (MI.getOpcode() == AMDGPU::S_MOV_B32 &&
+          MI.getOperand(1).isImm() &&
+          MI.getOperand(0).getReg() == AMDGPU::M0) {
+        auto R = M0Def.try_emplace(MI.getOperand(1).getImm(), &MI);
+        if (LIS)
+          LIS->RemoveMachineInstrFromMaps(MI);
+        if (R.second)
+          MI.removeFromParent();
+        else 
+          MI.eraseFromParent();
         CurM0Def = R.first->second;
       }
-      else
-        CurM0Def = nullptr;
-      continue;
-    }
-
-    if (CurM0Def && MI.findRegisterUseOperand(AMDGPU::M0))
+    } else if (CurM0Def && MI.findRegisterUseOperand(AMDGPU::M0, false, TRI))
       M0Map[&MI] = CurM0Def;
   }
 }
 
 void GCNIterativeScheduler::restoreM0Defs(MachineBasicBlock &BB) {
-  const MachineInstr *CurM0Def = nullptr;
+  MachineInstr *CurM0Def = nullptr;
   for (auto &MI : BB) {
-    if (MI.getOpcode() == AMDGPU::S_MOV_B32 &&
-      MI.getOperand(0).getReg() == AMDGPU::M0 &&
-      MI.getOperand(0).isImm()) {
-      CurM0Def = &MI;
-      continue;
-    }
-
     auto I = M0Map.find(&MI);
     if (I != M0Map.end() && I->second != CurM0Def) {
       CurM0Def = I->second;
-      BB.insert(&MI, MF.CloneMachineInstr(CurM0Def));
+      auto *NewMI = MF.CloneMachineInstr(CurM0Def);
+      BB.insert(&MI, NewMI);
+      if (LIS)
+        LIS->InsertMachineInstrInMaps(*NewMI);
     }
   }
 }
 
 void GCNIterativeScheduler::clearM0Map() {
-  /*for (auto &P : M0Map) {
-    auto *MI = P.second;
-  }*/
-  // TODO: erase unused MIs
+  // TODO: fix instr cleanup
+  //for (auto &P : M0Map)
+  //  MF.DeleteMachineInstr(P.second);
   M0Map.clear();
 }
 

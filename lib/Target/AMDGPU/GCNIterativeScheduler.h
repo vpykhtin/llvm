@@ -113,7 +113,7 @@ protected:
   MachineSchedContext *Context;
   const StrategyKind Strategy;
   mutable GCNUpwardRPTracker UPTracker;
-  DenseMap<const MachineInstr*, const MachineInstr*> M0Map;
+  DenseMap<const MachineInstr*, MachineInstr*> M0Map;
 
   class BuildDAG;
   class OverrideLegacyStrategy;
