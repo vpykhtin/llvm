@@ -36,7 +36,7 @@
 #include "llvm/CodeGen/ScheduleDAG.h"
 #include "llvm/CodeGen/ScheduleDFS.h"
 #include "llvm/Support/GraphWriter.h"
-#include "llvm/Support/Filesystem.h"
+#include "llvm/Support/FileSystem.h"
 
 using namespace llvm;
 
@@ -855,6 +855,85 @@ void GCNIterativeScheduler::scheduleILP(
   MFI->limitOccupancy(FinalOccupancy);
 }
 
+
+namespace {
+
+  /// MachineScheduler runs after coalescing and before register allocation.
+class PreRCMachineScheduler : public MachineSchedulerBase {
+  public:
+    PreRCMachineScheduler();
+
+    void getAnalysisUsage(AnalysisUsage &AU) const override;
+
+    bool runOnMachineFunction(MachineFunction&) override;
+
+    static char ID; // Class identification, replacement for typeinfo
+  };
+
+} // end anonymous namespace
+
+char PreRCMachineScheduler::ID = 0;
+
+namespace llvm {
+  void initializePreRCMachineSchedulerPass(PassRegistry&);
+}
+
+INITIALIZE_PASS_BEGIN(PreRCMachineScheduler, "prercmisched",
+  "Pre Reg Coalescer Machine Instruction Scheduler", false, false)
+  INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+  INITIALIZE_PASS_DEPENDENCY(MachineLoopInfo)
+  INITIALIZE_PASS_DEPENDENCY(SlotIndexes)
+  INITIALIZE_PASS_DEPENDENCY(LiveIntervals)
+INITIALIZE_PASS_END(PreRCMachineScheduler, "prercmisched",
+  "Pre Reg Coalescer Machine Instruction Scheduler", false, false)
+
+PreRCMachineScheduler::PreRCMachineScheduler() : MachineSchedulerBase(ID) {
+  initializePreRCMachineSchedulerPass(*PassRegistry::getPassRegistry());
+}
+
+void PreRCMachineScheduler::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.setPreservesCFG();
+  AU.addRequiredID(MachineDominatorsID);
+  AU.addRequired<MachineLoopInfo>();
+  AU.addRequired<AAResultsWrapperPass>();
+  AU.addRequired<TargetPassConfig>();
+  AU.addRequired<SlotIndexes>();
+  AU.addPreserved<SlotIndexes>();
+  AU.addRequired<LiveIntervals>();
+  AU.addPreserved<LiveIntervals>();
+  MachineFunctionPass::getAnalysisUsage(AU);
+}
+
+bool PreRCMachineScheduler::runOnMachineFunction(MachineFunction &mf) {
+  if (skipFunction(mf.getFunction()))
+    return false;
+
+  // Initialize the context of the pass.
+  MF = &mf;
+  MLI = &getAnalysis<MachineLoopInfo>();
+  MDT = &getAnalysis<MachineDominatorTree>();
+  PassConfig = &getAnalysis<TargetPassConfig>();
+  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
+
+  LIS = &getAnalysis<LiveIntervals>();
+
+  LLVM_DEBUG(dbgs() << "Running minregonly\n");
+
+  // Instantiate the selected scheduler for this target, function, and
+  // optimization level.
+  std::unique_ptr<ScheduleDAGInstrs> Scheduler(
+    new GCNIterativeScheduler(this, GCNIterativeScheduler::SCHEDULE_MINREGONLY));
+  scheduleRegions(*Scheduler, false);
+
+  return true;
+}
+
+namespace llvm {
+MachineFunctionPass* createPreRCMachineScheduler() {
+  return new PreRCMachineScheduler();
+}
+}
+
 #ifndef NDEBUG
 namespace llvm {
 
@@ -1007,80 +1086,6 @@ void writeSubtreeGraph(const SchedDFSResult2 &R, StringRef Name) {
 #endif
 
   O << "}\n";
-}
-
-namespace {
-
-  /// MachineScheduler runs after coalescing and before register allocation.
-class PreRCMachineScheduler : public MachineSchedulerBase {
-  public:
-    PreRCMachineScheduler();
-
-    void getAnalysisUsage(AnalysisUsage &AU) const override;
-
-    bool runOnMachineFunction(MachineFunction&) override;
-
-    static char ID; // Class identification, replacement for typeinfo
-  };
-
-} // end anonymous namespace
-
-char PreRCMachineScheduler::ID = 0;
-
-void initializePreRCMachineSchedulerPass(PassRegistry&);
-
-INITIALIZE_PASS_BEGIN(PreRCMachineScheduler, "prercmisched",
-  "Pre Reg Coalescer Machine Instruction Scheduler", false, false)
-  INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
-  INITIALIZE_PASS_DEPENDENCY(MachineLoopInfo)
-  INITIALIZE_PASS_DEPENDENCY(SlotIndexes)
-  INITIALIZE_PASS_DEPENDENCY(LiveIntervals)
-INITIALIZE_PASS_END(PreRCMachineScheduler, "prercmisched",
-  "Pre Reg Coalescer Machine Instruction Scheduler", false, false)
-
-PreRCMachineScheduler::PreRCMachineScheduler() : MachineSchedulerBase(ID) {
-  initializePreRCMachineSchedulerPass(*PassRegistry::getPassRegistry());
-}
-
-void PreRCMachineScheduler::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.setPreservesCFG();
-  AU.addRequiredID(MachineDominatorsID);
-  AU.addRequired<MachineLoopInfo>();
-  AU.addRequired<AAResultsWrapperPass>();
-  AU.addRequired<TargetPassConfig>();
-  AU.addRequired<SlotIndexes>();
-  AU.addPreserved<SlotIndexes>();
-  AU.addRequired<LiveIntervals>();
-  AU.addPreserved<LiveIntervals>();
-  MachineFunctionPass::getAnalysisUsage(AU);
-}
-
-bool PreRCMachineScheduler::runOnMachineFunction(MachineFunction &mf) {
-  if (skipFunction(mf.getFunction()))
-    return false;
-
-  // Initialize the context of the pass.
-  MF = &mf;
-  MLI = &getAnalysis<MachineLoopInfo>();
-  MDT = &getAnalysis<MachineDominatorTree>();
-  PassConfig = &getAnalysis<TargetPassConfig>();
-  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
-
-  LIS = &getAnalysis<LiveIntervals>();
-
-  LLVM_DEBUG(dbgs() << "Running minregonly\n");
-
-  // Instantiate the selected scheduler for this target, function, and
-  // optimization level.
-  std::unique_ptr<ScheduleDAGInstrs> Scheduler(
-    new GCNIterativeScheduler(this, GCNIterativeScheduler::SCHEDULE_MINREGONLY));
-  scheduleRegions(*Scheduler, false);
-
-  return true;
-}
-
-MachineFunctionPass* createPreRCMachineScheduler() {
-  return new PreRCMachineScheduler();
 }
 
 } // end namespace llvm

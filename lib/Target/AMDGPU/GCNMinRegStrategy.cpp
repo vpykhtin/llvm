@@ -19,7 +19,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/GraphWriter.h"
-#include "llvm/Support/Filesystem.h"
+#include "llvm/Support/FileSystem.h"
 #include <cassert>
 #include <cstdint>
 #include <limits>
@@ -1475,8 +1475,8 @@ public:
 private:
   Subgraph &SG;
   GCNMinRegScheduler2 &LSUSource;
-  std::vector<unsigned> NumSuccs;
   std::vector<unsigned> SethiUllmanNumbers;
+  std::vector<unsigned> NumSuccs;
 
   struct scheduleLater {
     const SGScheduler &SGS;

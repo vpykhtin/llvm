@@ -76,7 +76,7 @@ public:
     return static_cast<SchedDFSResult2*>(DFSResult);
   }
 
-  const auto &getTopo() const { return Topo; }
+  auto getTopo() const -> const decltype(Topo)& { return Topo; }
 
 protected:
   using ScheduleRef = ArrayRef<const SUnit *>;
