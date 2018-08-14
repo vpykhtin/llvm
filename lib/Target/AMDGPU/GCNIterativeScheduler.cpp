@@ -242,6 +242,9 @@ bool GCNIterativeScheduler::validateSchedule(const Region &R,
       }
     Res = false; // TODO: uncomment this
   }
+  if (!Res) {
+    dbgs() << "ERROR: invalid schedule for " << R.getName(LIS) << '\n';
+  }
   return Res;
 }
 #endif

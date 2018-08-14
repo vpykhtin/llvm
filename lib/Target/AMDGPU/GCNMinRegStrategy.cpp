@@ -828,7 +828,7 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
     return std::vector<GCNMinRegScheduler2::MergeChunk>();
 
   //const bool Dump = ID == 17;
-  //const bool Dump = ID == 2;
+  //const bool Dump = ID == 2 && MergeTo->ID==0;
   const bool Dump = false;
 
   std::vector<MergeChunk> Chunks(MergePointInfo.size());
@@ -857,15 +857,10 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
       if (Pred.isWeak() || Pred.getSUnit()->isBoundaryNode())
         continue;
 
-      //if (!MPLSU.hasExternalDataSuccs)
-      //  continue;
-
       auto &MPLSU = LSUSource.getLSU(Pred.getSUnit());
-      if (MPLSU.Parent != MergeTo)
-        continue;
-
       auto I = MergePointInfo.find(&MPLSU);
-      assert(I != MergePointInfo.end());
+      if (I == MergePointInfo.end())
+        continue;
 
       if (Pred.isAssignedRegDep()) {
         assert(I->second.NumDataSuccs);
