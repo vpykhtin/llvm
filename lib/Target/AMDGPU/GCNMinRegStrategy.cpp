@@ -806,9 +806,6 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
   DenseMap<LinkedSU*, Info> MergePointInfo; {
     unsigned ExecOrder = 0; // actually inverted order
     for (auto &LSU : MergeTo->List) {
-      //if (!LSU.hasExternalDataSuccs)
-      //  continue;
-
       unsigned NumDataSuccs = 0;
       bool HasCtrlSuccs = false;
       for (const auto &Succ : LSU->Succs) {
@@ -828,8 +825,8 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
     return std::vector<GCNMinRegScheduler2::MergeChunk>();
 
   //const bool Dump = ID == 17;
-  //const bool Dump = ID == 2 && MergeTo->ID==0;
-  const bool Dump = false;
+  const bool Dump = ID == 7 && MergeTo->ID==0;
+  //const bool Dump = false;
 
   std::vector<MergeChunk> Chunks(MergePointInfo.size());
   SGRPTracker2 RPT(LSUSource, *this);
@@ -908,6 +905,13 @@ GCNMinRegScheduler2::Subgraph::getMergeChunks(Subgraph *MergeTo,
   for (auto &C : Chunks)
     if (C.MergePoint)
       ReadyChunks.push_back(C);
+
+  LLVM_DEBUG(if (Dump) {
+    for (auto &C : ReadyChunks) {
+      dbgs() << "Merge point after: " << *(*C.MergePoint)->getInstr();
+      dbgs() << "Best NumRegs: " << C.NumRegDeps << '\n';
+    }
+  });
 
   return ReadyChunks;
 }
